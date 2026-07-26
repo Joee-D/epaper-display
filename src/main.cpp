@@ -94,18 +94,14 @@ void setup() {
   displayInit();
 
   bool forcePortal = configButtonHeld();
-  if (forcePortal) {
-    configFactoryReset();
-    configLoad(cfg); // reload defaults after reset
-  }
 
   // WiFiManager will silently reuse previously-saved WiFi credentials if
   // they exist and connect fast; it only opens the captive portal if that
-  // fails (or if forcePortal requested it explicitly).
+  // fails or if the user held the config button.
   wm.setConnectTimeout(15);
 
-  if (forcePortal || WiFi.SSID() == "") {
-    runProvisioningPortal(forcePortal);
+  if (forcePortal) {
+    runProvisioningPortal(true);
   } else {
     if (!wm.autoConnect("epaper-display-Setup")) {
       displayShowMessage("WiFi connect failed", "Retrying after deep sleep");
