@@ -3,25 +3,34 @@
 #include <HTTPClient.h>
 #include <WiFiClient.h>
 
-// GxEPD2 driver class for the Waveshare 4.2" V2 panel: SSD1683 controller,
-// 400x300, b/w only, no partial-refresh inking. If you actually have the
-// older V1 board (UC8176/IL0398 controller) use GxEPD2_420 + GxEPD2_420.h
-// instead — see the GxEPD2 library's GxEPD2_display_selection.h for the
-// full list of supported panels.
 #include <GxEPD2_BW.h>
 #include <gdey/GxEPD2_420_GDEY042T81.h>
 
 static GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> epd(
     GxEPD2_420_GDEY042T81(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY));
 
+RTC_DATA_ATTR static int refreshCounter = 0; 
+
+// 定义每快刷多少次后，执行一次全屏刷新清除残影（可根据实际残影严重程度修改）
+const int FULL_REFRESH_INTERVAL = 5; 
+
 void displayInit() {
   SPI.begin(PIN_EPD_SCK, /*MISO=*/-1, PIN_EPD_MOSI, PIN_EPD_CS);
-  epd.init(115200, /*initial=*/true, /*resetDuration=*/20, /*pulldown_rst_mode=*/false);
-  epd.setRotation(0); // landscape; use 3 for the other landscape orientation
+  
+  bool isFullRefresh = (refreshCounter == 0);
+  
+  epd.init(115200, isFullRefresh, /*resetDuration=*/20, /*pulldown_rst_mode=*/false);
+  epd.setRotation(0); 
 }
 
 void displayShowMessage(const String &line1, const String &line2) {
-  epd.setFullWindow();
+  // 根据当前初始化状态选择窗口模式
+  if (refreshCounter == 0) {
+    epd.setFullWindow();
+  } else {
+    epd.setPartialWindow(0, 0, epd.width(), epd.height());
+  }
+
   epd.firstPage();
   do {
     epd.fillScreen(GxEPD_WHITE);
@@ -98,7 +107,12 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
     return false;
   }
 
-  epd.setFullWindow();
+  if (refreshCounter == 0) {
+    epd.setFullWindow(); // 全屏黑白闪烁刷洗
+  } else {
+    epd.setPartialWindow(0, 0, EPD_WIDTH, EPD_HEIGHT); // 无闪烁快速局刷
+  }
+
   epd.firstPage();
   do {
     epd.fillScreen(GxEPD_WHITE);
@@ -106,6 +120,12 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
   } while (epd.nextPage());
 
   free(buf);
+
+  refreshCounter++;
+  if (refreshCounter > FULL_REFRESH_INTERVAL) {
+    refreshCounter = 0; // 达到设定次数，下次唤醒时触发全刷
+  }
+
   return true;
 }
 
