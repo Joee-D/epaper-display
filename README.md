@@ -4,6 +4,8 @@ ESP32 firmware for a Waveshare 4.2-inch V2 e-paper panel. It provisions Wi-Fi
 and an image endpoint through a captive portal, downloads a 400×300 1-bit raw
 bitmap on each wake-up, displays it, then deep-sleeps until the next refresh.
 
+<img width="1920" height="1080" alt="IMG_3356" src="https://github.com/user-attachments/assets/dac1687e-7988-471f-b88c-2f2b705c35dc" />
+
 ## Build and flash
 
 Install [PlatformIO](https://platformio.org/) and connect an ESP32-WROOM-32E
