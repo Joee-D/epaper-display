@@ -33,7 +33,8 @@
 // BOOT/FLASH button on virtually every ESP32-WROOM-32E devkit.
 #define PIN_CONFIG_BUTTON 0
 
-void displayInit();
+// Initializes the panel using the configured orientation.
+void displayInit(const DeviceConfig &cfg);
 
 // Downloads the raw 1bpp bitmap from cfg.serverUrl and draws it full-screen.
 // Returns true on success.

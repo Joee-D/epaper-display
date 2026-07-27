@@ -30,6 +30,7 @@ WiFiManager wm;
 // built-in SSID/password fields.
 WiFiManagerParameter paramServerUrl("server", "Image server URL", "", 200);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
+WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
 
 String deviceId() {
   return WiFi.macAddress();
@@ -51,7 +52,11 @@ bool configButtonHeld() {
 void saveConfigCallback() {
   cfg.serverUrl   = paramServerUrl.getValue();
   cfg.intervalMin = String(paramInterval.getValue()).toInt();
-  if (cfg.intervalMin == 0) cfg.intervalMin = 15;
+  if (cfg.intervalMin < MIN_REFRESH_INTERVAL_MIN ||
+      cfg.intervalMin > MAX_REFRESH_INTERVAL_MIN) {
+    cfg.intervalMin = 15;
+  }
+  cfg.rotate180 = String(paramRotate180.getValue()).toInt() != 0;
   configSave(cfg);
 }
 
@@ -61,8 +66,10 @@ void runProvisioningPortal(bool forced) {
 
   paramServerUrl.setValue(cfg.serverUrl.c_str(), 200);
   paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
+  paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
   wm.addParameter(&paramServerUrl);
   wm.addParameter(&paramInterval);
+  wm.addParameter(&paramRotate180);
   wm.setSaveParamsCallback(saveConfigCallback);
   wm.setConfigPortalTimeout(300); // give up and retry later if nobody shows up
 
@@ -91,7 +98,7 @@ void setup() {
   delay(200);
 
   configLoad(cfg);
-  displayInit();
+  displayInit(cfg);
 
   bool forcePortal = configButtonHeld();
 
@@ -100,7 +107,10 @@ void setup() {
   // fails or if the user held the config button.
   wm.setConnectTimeout(15);
 
-  if (forcePortal) {
+  // A device with WiFi credentials but no image endpoint still needs the
+  // portal; otherwise it would only show an error until the BOOT button is
+  // held on a later wake-up.
+  if (forcePortal || cfg.serverUrl.length() == 0) {
     runProvisioningPortal(true);
   } else {
     if (!wm.autoConnect("epaper-display-Setup")) {

@@ -4,25 +4,35 @@
 
 static const char *NS = "epaper-display";
 
-static const char *DEFAULT_SERVER_URL = "http://192.168.1.100:5000/epaper-display/image";
 static const uint32_t DEFAULT_INTERVAL_MIN = 15;
+
+static uint32_t normalizedInterval(uint32_t intervalMin) {
+  if (intervalMin < MIN_REFRESH_INTERVAL_MIN ||
+      intervalMin > MAX_REFRESH_INTERVAL_MIN) {
+    return DEFAULT_INTERVAL_MIN;
+  }
+  return intervalMin;
+}
 
 void configLoad(DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NS, /*readOnly=*/true);
-  cfg.serverUrl   = prefs.getString("server_url", DEFAULT_SERVER_URL);
+  cfg.serverUrl   = prefs.getString("server_url", "");
+  cfg.serverUrl.trim();
   cfg.intervalMin = prefs.getUInt("interval_min", DEFAULT_INTERVAL_MIN);
   cfg.rotate180   = prefs.getBool("rotate180", false);
   prefs.end();
 
-  if (cfg.intervalMin == 0) cfg.intervalMin = DEFAULT_INTERVAL_MIN;
+  cfg.intervalMin = normalizedInterval(cfg.intervalMin);
 }
 
 void configSave(const DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NS, /*readOnly=*/false);
-  prefs.putString("server_url", cfg.serverUrl);
-  prefs.putUInt("interval_min", cfg.intervalMin);
+  String serverUrl = cfg.serverUrl;
+  serverUrl.trim();
+  prefs.putString("server_url", serverUrl);
+  prefs.putUInt("interval_min", normalizedInterval(cfg.intervalMin));
   prefs.putBool("rotate180", cfg.rotate180);
   prefs.end();
 }

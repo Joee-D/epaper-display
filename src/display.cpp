@@ -9,23 +9,25 @@
 static GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> epd(
     GxEPD2_420_GDEY042T81(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY));
 
-RTC_DATA_ATTR static int refreshCounter = 0; 
+// After this many partial updates, do a full refresh to remove ghosting.
+constexpr uint8_t FULL_REFRESH_INTERVAL = 5;
+RTC_DATA_ATTR static uint8_t partialRefreshCount = FULL_REFRESH_INTERVAL;
 
-// 定义每快刷多少次后，执行一次全屏刷新清除残影（可根据实际残影严重程度修改）
-const int FULL_REFRESH_INTERVAL = 5; 
+static bool needsFullRefresh() {
+  return partialRefreshCount >= FULL_REFRESH_INTERVAL;
+}
 
-void displayInit() {
+void displayInit(const DeviceConfig &cfg) {
   SPI.begin(PIN_EPD_SCK, /*MISO=*/-1, PIN_EPD_MOSI, PIN_EPD_CS);
   
-  bool isFullRefresh = (refreshCounter == 0);
+  bool isFullRefresh = needsFullRefresh();
   
   epd.init(115200, isFullRefresh, /*resetDuration=*/20, /*pulldown_rst_mode=*/false);
-  epd.setRotation(0); 
+  epd.setRotation(cfg.rotate180 ? 2 : 0);
 }
 
 void displayShowMessage(const String &line1, const String &line2) {
-  // 根据当前初始化状态选择窗口模式
-  if (refreshCounter == 0) {
+  if (needsFullRefresh()) {
     epd.setFullWindow();
   } else {
     epd.setPartialWindow(0, 0, epd.width(), epd.height());
@@ -52,38 +54,57 @@ void displayShowMessage(const String &line1, const String &line2) {
 
 bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
   if (cfg.serverUrl.length() == 0) {
-    displayShowMessage("No server configured", "Set it up at 192.168.4.1");
+    Serial.println("Image fetch skipped: no server configured");
     return false;
+  }
+
+  // MAC addresses contain ':'; encode the identifier so it remains a valid
+  // query value if the server later uses stricter URL parsing.
+  String encodedId;
+  for (size_t i = 0; i < deviceId.length(); ++i) {
+    const char c = deviceId[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedId += c;
+    } else {
+      char escaped[4];
+      snprintf(escaped, sizeof(escaped), "%%%02X", static_cast<unsigned char>(c));
+      encodedId += escaped;
+    }
   }
 
   String url = cfg.serverUrl;
   url += (url.indexOf('?') >= 0) ? '&' : '?';
-  url += "w=" + String(EPD_WIDTH) + "&h=" + String(EPD_HEIGHT) + "&id=" + deviceId;
+  url += "w=" + String(EPD_WIDTH) + "&h=" + String(EPD_HEIGHT) + "&id=" + encodedId;
 
   HTTPClient http;
   http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   if (!http.begin(url)) {
-    displayShowMessage("Bad server URL", url);
+    Serial.println("Image fetch failed: invalid server URL");
     return false;
   }
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    displayShowMessage("Fetch failed", "HTTP " + String(code));
+    Serial.printf("Image fetch failed: HTTP %d\n", code);
     http.end();
     return false;
   }
 
   int len = http.getSize();
-  if (len != EPD_IMAGE_BYTES) {
-    displayShowMessage("Bad image size", String(len) + " != " + String(EPD_IMAGE_BYTES));
+  // Chunked HTTP responses report -1 here. They are valid as long as the
+  // stream delivers exactly one framebuffer below.
+  if (len >= 0 && len != EPD_IMAGE_BYTES) {
+    Serial.printf("Image fetch failed: expected %d bytes, got %d\n",
+                  EPD_IMAGE_BYTES, len);
     http.end();
     return false;
   }
 
   uint8_t *buf = (uint8_t *)malloc(EPD_IMAGE_BYTES);
   if (!buf) {
-    displayShowMessage("Out of memory", "");
+    Serial.println("Image fetch failed: out of memory");
     http.end();
     return false;
   }
@@ -103,14 +124,15 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
 
   if (received != (size_t)EPD_IMAGE_BYTES) {
     free(buf);
-    displayShowMessage("Incomplete download", String(received) + "/" + String(EPD_IMAGE_BYTES));
+    Serial.printf("Image fetch failed: incomplete download (%u/%d bytes)\n",
+                  static_cast<unsigned>(received), EPD_IMAGE_BYTES);
     return false;
   }
 
-  if (refreshCounter == 0) {
-    epd.setFullWindow(); // 全屏黑白闪烁刷洗
+  if (needsFullRefresh()) {
+    epd.setFullWindow();
   } else {
-    epd.setPartialWindow(0, 0, EPD_WIDTH, EPD_HEIGHT); // 无闪烁快速局刷
+    epd.setPartialWindow(0, 0, EPD_WIDTH, EPD_HEIGHT);
   }
 
   epd.firstPage();
@@ -121,9 +143,10 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
 
   free(buf);
 
-  refreshCounter++;
-  if (refreshCounter > FULL_REFRESH_INTERVAL) {
-    refreshCounter = 0; // 达到设定次数，下次唤醒时触发全刷
+  if (needsFullRefresh()) {
+    partialRefreshCount = 0;
+  } else {
+    ++partialRefreshCount;
   }
 
   return true;
