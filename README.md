@@ -20,9 +20,10 @@ Adjust the pin definitions before flashing if your display is wired differently.
 ## First setup
 
 On first boot, join the `epaper-display-Setup` Wi-Fi network and open
-`http://192.168.4.1`. Enter Wi-Fi credentials, the image URL, and a refresh
-interval from 1 minute to 7 days. Hold the ESP32 BOOT button for three seconds
-while starting up to force the portal again.
+`http://192.168.4.1`. Enter Wi-Fi credentials, the image server's IP address,
+and a refresh interval from 1 minute to 7 days. Only the IP is needed — the
+firmware appends `:35000/epaper-display/image` automatically. Hold the ESP32
+BOOT button for three seconds while starting up to force the portal again.
 
 Set **Rotate display 180 degrees** to `1` if the panel is mounted upside down.
 

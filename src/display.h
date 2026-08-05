@@ -36,8 +36,8 @@
 // Initializes the panel using the configured orientation.
 void displayInit(const DeviceConfig &cfg);
 
-// Downloads the raw 1bpp bitmap from cfg.serverUrl and draws it full-screen.
-// Returns true on success.
+// Downloads the raw 1bpp bitmap from the configured image server and draws it
+// full-screen. Returns true on success.
 bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId);
 
 // Draws a simple centered two-line status/error message (used for setup

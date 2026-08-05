@@ -83,8 +83,8 @@ TIME_SEGMENTS = [
         "display_name": "CSI Dividend Low Volatility 100",
         "start_time": "21:30",
         "end_time": "00:00",
-        "xticks": [0, 68, 149],
-        "xticklabels": [" 09:30", "12:00", "15:00 "],
+        "xticks": [0, 60, 119],
+        "xticklabels": [" 09:30", "13:00", "15:00 "],
         "output_file": "sse_trend.png",
     },
 ]

@@ -14,11 +14,25 @@ static uint32_t normalizedInterval(uint32_t intervalMin) {
   return intervalMin;
 }
 
+String buildServerUrl(const DeviceConfig &cfg) {
+  String host = cfg.serverIp;
+  host.trim();
+  // Tolerate a pasted URL: drop scheme, port, and path if present.
+  int scheme = host.indexOf("://");
+  if (scheme >= 0) host = host.substring(scheme + 3);
+  int slash = host.indexOf('/');
+  if (slash >= 0) host = host.substring(0, slash);
+  int colon = host.indexOf(':');
+  if (colon >= 0) host = host.substring(0, colon);
+  if (host.length() == 0) return "";
+  return "http://" + host + ":" + String(SERVER_PORT) + SERVER_PATH;
+}
+
 void configLoad(DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NS, /*readOnly=*/true);
-  cfg.serverUrl   = prefs.getString("server_url", "");
-  cfg.serverUrl.trim();
+  cfg.serverIp    = prefs.getString("server_ip", "");
+  cfg.serverIp.trim();
   cfg.intervalMin = prefs.getUInt("interval_min", DEFAULT_INTERVAL_MIN);
   cfg.rotate180   = prefs.getBool("rotate180", false);
   prefs.end();
@@ -29,9 +43,9 @@ void configLoad(DeviceConfig &cfg) {
 void configSave(const DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NS, /*readOnly=*/false);
-  String serverUrl = cfg.serverUrl;
-  serverUrl.trim();
-  prefs.putString("server_url", serverUrl);
+  String serverIp = cfg.serverIp;
+  serverIp.trim();
+  prefs.putString("server_ip", serverIp);
   prefs.putUInt("interval_min", normalizedInterval(cfg.intervalMin));
   prefs.putBool("rotate180", cfg.rotate180);
   prefs.end();

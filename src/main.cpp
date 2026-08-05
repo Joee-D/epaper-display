@@ -27,8 +27,10 @@ DeviceConfig cfg;
 WiFiManager wm;
 
 // Custom fields shown on the WiFiManager config portal, alongside the
-// built-in SSID/password fields.
-WiFiManagerParameter paramServerUrl("server", "Image server URL", "", 200);
+// built-in SSID/password fields. Only the server IP is entered here; the
+// scheme, port, and endpoint path are filled in automatically by
+// buildServerUrl().
+WiFiManagerParameter paramServerIp("server", "Image server IP", "", 45);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
 
@@ -50,7 +52,7 @@ bool configButtonHeld() {
 }
 
 void saveConfigCallback() {
-  cfg.serverUrl   = paramServerUrl.getValue();
+  cfg.serverIp    = paramServerIp.getValue();
   cfg.intervalMin = String(paramInterval.getValue()).toInt();
   if (cfg.intervalMin < MIN_REFRESH_INTERVAL_MIN ||
       cfg.intervalMin > MAX_REFRESH_INTERVAL_MIN) {
@@ -64,10 +66,10 @@ void runProvisioningPortal(bool forced) {
   displayShowMessage("Setup mode",
                       "Join WiFi \"epaper-display-Setup\" then open 192.168.4.1");
 
-  paramServerUrl.setValue(cfg.serverUrl.c_str(), 200);
+  paramServerIp.setValue(cfg.serverIp.c_str(), 45);
   paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
   paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
-  wm.addParameter(&paramServerUrl);
+  wm.addParameter(&paramServerIp);
   wm.addParameter(&paramInterval);
   wm.addParameter(&paramRotate180);
   wm.setSaveParamsCallback(saveConfigCallback);
@@ -110,7 +112,7 @@ void setup() {
   // A device with WiFi credentials but no image endpoint still needs the
   // portal; otherwise it would only show an error until the BOOT button is
   // held on a later wake-up.
-  if (forcePortal || cfg.serverUrl.length() == 0) {
+  if (forcePortal || cfg.serverIp.length() == 0) {
     runProvisioningPortal(true);
   } else {
     if (!wm.autoConnect("epaper-display-Setup")) {
@@ -121,7 +123,7 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (cfg.serverUrl.length() == 0) {
+    if (cfg.serverIp.length() == 0) {
       displayShowMessage("No server configured",
                           "Hold BOOT button 3s to open setup");
     } else {

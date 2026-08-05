@@ -53,7 +53,8 @@ void displayShowMessage(const String &line1, const String &line2) {
 }
 
 bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
-  if (cfg.serverUrl.length() == 0) {
+  String url = buildServerUrl(cfg);
+  if (url.length() == 0) {
     Serial.println("Image fetch skipped: no server configured");
     return false;
   }
@@ -73,7 +74,6 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
     }
   }
 
-  String url = cfg.serverUrl;
   url += (url.indexOf('?') >= 0) ? '&' : '?';
   url += "w=" + String(EPD_WIDTH) + "&h=" + String(EPD_HEIGHT) + "&id=" + encodedId;
 
