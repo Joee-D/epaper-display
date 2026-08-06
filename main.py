@@ -1,10 +1,17 @@
 import io
 import argparse
+import logging
 import os
 import threading
 import time
-import warnings
 from datetime import datetime
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("epaper")
 
 from flask import Flask, Response, jsonify, request
 from PIL import Image
@@ -110,25 +117,24 @@ def fetch_prices(ticker):
         obj = yf.Ticker(ticker)
         df = obj.history(period="1d", interval="2m")
         if df.empty:
-            print(f"数据获取失败 ({ticker}): 未返回行情数据")
+            logger.warning("数据获取失败 (%s): 未返回行情数据", ticker)
             return None, None, None
-        prev_close = (
-            obj.info.get("previousClose")
-            or obj.info.get("regularMarketPreviousClose")
-            or df["Open"].iloc[0]
-        )
-        # 用 fast_info 获取实时最新价格
+        # 用轻量的 fast_info 获取前收和最新价，避免加载 obj.info 的大量公司元数据。
         try:
+            prev_close = obj.fast_info.previous_close
             latest_price = obj.fast_info.last_price
         except Exception:
+            prev_close = None
             latest_price = None
+        if not prev_close or prev_close <= 0:
+            prev_close = df["Open"].iloc[0]
         prices = df["Close"].dropna().values
         if len(prices) == 0 or prev_close is None or prev_close <= 0:
-            print(f"数据获取失败 ({ticker}): 行情数据不完整")
+            logger.warning("数据获取失败 (%s): 行情数据不完整", ticker)
             return None, None, None
         return prices, float(prev_close), latest_price
     except Exception as e:
-        print(f"数据获取失败 ({ticker}): {e}")
+        logger.warning("数据获取失败 (%s): %s", ticker, e)
         return None, None, None
 
 
@@ -221,7 +227,7 @@ def create_chart(config, prices, prev_close, latest_price):
 
 def push_to_device(img_bytes, filename):
     if not API_KEY or not PUSH_URL:
-        print("推送失败: 请设置 ZECTRIX_API_KEY 和 ZECTRIX_DEVICE_ID")
+        logger.error("推送失败: 请设置 ZECTRIX_API_KEY 和 ZECTRIX_DEVICE_ID")
         return False
     try:
         resp = requests.post(
@@ -232,10 +238,10 @@ def push_to_device(img_bytes, filename):
             timeout=PUSH_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
-        print(f"推送成功: 已发送 {filename} 到设备 {DEVICE_ID}")
+        logger.info("推送成功: 已发送 %s 到设备 %s", filename, DEVICE_ID)
         return True
     except requests.exceptions.RequestException as e:
-        print(f"推送失败: {e}")
+        logger.error("推送失败: %s", e)
         return False
 
 
@@ -287,7 +293,7 @@ def render_segment_png(config, log_prefix):
     if latest_price is None:
         latest_price = prices[-1]
     if not np.isfinite(latest_price):
-        print(f"{log_prefix}图表生成失败: {config['name']} 最新价格无效")
+        logger.warning("%s图表生成失败: %s 最新价格无效", log_prefix, config["name"])
         return None
 
     # Flask 可并发处理请求，pyplot 则需要串行使用。
@@ -296,7 +302,10 @@ def render_segment_png(config, log_prefix):
         try:
             buffer = io.BytesIO()
             fig.savefig(buffer, format="png", facecolor="white", edgecolor="none")
-            print(f"{log_prefix}图表生成: {config['name']} {current:,.3f} ({pct:+.2f}%)")
+            logger.info(
+                "%s图表生成: %s %s (%+.2f%%)",
+                log_prefix, config["name"], f"{current:,.3f}", pct,
+            )
             return buffer.getvalue()
         finally:
             plt.close(fig)
@@ -338,11 +347,11 @@ def epaper_image():
         width = int(request.args.get("w", EPD_WIDTH))
         height = int(request.args.get("h", EPD_HEIGHT))
     except ValueError:
-        print("服务请求失败: 图片尺寸参数不是整数")
+        logger.warning("服务请求失败: 图片尺寸参数不是整数")
         return Response("Invalid dimensions", status=400, mimetype="text/plain")
 
     if (width, height) != (EPD_WIDTH, EPD_HEIGHT):
-        print(f"服务请求失败: 不支持的图片尺寸 {width}x{height}")
+        logger.warning("服务请求失败: 不支持的图片尺寸 %sx%s", width, height)
         return Response(
             f"This service provides {EPD_WIDTH}x{EPD_HEIGHT} images only",
             status=400,
@@ -351,7 +360,7 @@ def epaper_image():
 
     payload = current_bitmap()
     if payload is None:
-        print("服务请求失败: 当前没有可用图表，返回 503")
+        logger.warning("服务请求失败: 当前没有可用图表，返回 503")
         return Response(
             "No chart is available yet; preserving the display's previous image",
             status=503,
@@ -359,7 +368,7 @@ def epaper_image():
         )
 
     device_id = request.args.get("id", "未提供设备 ID")
-    print(f"服务请求成功: 向 {device_id} 返回 {len(payload)} 字节图像")
+    logger.info("服务请求成功: 向 %s 返回 %s 字节图像", device_id, len(payload))
     return Response(payload, mimetype="application/octet-stream")
 
 
@@ -377,7 +386,7 @@ def healthz():
 def process_segment(config):
     png_bytes = render_segment_png(config, "推送")
     if png_bytes is None:
-        print(f"推送跳过: {config['name']} 无可用图表")
+        logger.info("推送跳过: %s 无可用图表", config["name"])
         return
 
     try:
@@ -385,7 +394,7 @@ def process_segment(config):
             output.write(png_bytes)
     except OSError as error:
         # 本地文件仅用于留档，写入失败不应阻止向设备推送。
-        print(f"图片留档失败 ({config['output_file']}): {error}")
+        logger.warning("图片留档失败 (%s): %s", config["output_file"], error)
 
     push_to_device(png_bytes, config["output_file"])
 
@@ -399,19 +408,22 @@ def run_push_cycle():
     local_weekday = weekdays[now_local.weekday()]
     et_weekday = weekdays[now_et.weekday()]
 
-    print(f"\n{'=' * 40}")
-    print("市场数据推送")
-    print(f"服务器时间: {now_local.strftime('%Y-%m-%d')} {local_weekday} {now_local.strftime('%H:%M:%S')}")
-    print(f"美东时间:   {now_et.strftime('%Y-%m-%d')} {et_weekday} {now_et.strftime('%H:%M:%S %Z')}")
+    logger.info("市场数据推送")
+    logger.info(
+        "服务器时间: %s %s %s",
+        now_local.strftime("%Y-%m-%d"), local_weekday, now_local.strftime("%H:%M:%S"),
+    )
+    logger.info(
+        "美东时间:   %s %s %s",
+        now_et.strftime("%Y-%m-%d"), et_weekday, now_et.strftime("%H:%M:%S %Z"),
+    )
 
     active = [config for config in TIME_SEGMENTS if is_trading_now(config)]
     if active:
         for config in active:
             process_segment(config)
     else:
-        print("休市中，跳过更新")
-
-    print(f"{'=' * 40}\n")
+        logger.info("休市中，跳过更新")
 
 
 def positive_interval(value):
@@ -433,16 +445,32 @@ def run_push_loop(interval_minutes, once=False):
                 return
             time.sleep(interval_minutes * 60)
     except KeyboardInterrupt:
-        print("\n已停止推送模式")
+        logger.info("已停止推送模式")
+
+
+def run_both(host, port, interval_minutes):
+    """同时在后台提供服务接口，并在主线程定期推送。"""
+    from werkzeug.serving import make_server
+
+    server = make_server(host, port, app, threaded=True)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    logger.info("服务模式已启动（后台线程）")
+    logger.info("图片接口地址: http://%s:%s/epaper-display/image", host, port)
+    try:
+        run_push_loop(interval_minutes)
+    finally:
+        server.shutdown()
+        server_thread.join()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate, push, or serve e-paper charts")
     parser.add_argument(
         "--mode",
-        choices=("service", "push"),
+        choices=("service", "push", "both"),
         default="push",
-        help="运行模式：service 提供接口；push 定期推送（默认：push）",
+        help="运行模式：service 提供接口；push 定期推送；both 同时运行（默认：push）",
     )
     parser.add_argument("--host", default="0.0.0.0", help="server bind address")
     parser.add_argument("--port", type=int, default=35000, help="server port")
@@ -464,13 +492,17 @@ def main():
         parser.error("--once 仅适用于推送模式")
 
     if args.mode == "service":
-        print("服务模式已启动")
-        print(f"图片接口地址: http://{args.host}:{args.port}/epaper-display/image")
-        print("服务正在运行，等待设备请求图片...")
+        logger.info("服务模式已启动")
+        logger.info("图片接口地址: http://%s:%s/epaper-display/image", args.host, args.port)
+        logger.info("服务正在运行，等待设备请求图片...")
         app.run(host=args.host, port=args.port, threaded=True)
         return
 
-    print(f"推送模式已启动，周期：每 {args.interval:g} 分钟")
+    if args.mode == "both":
+        run_both(args.host, args.port, args.interval)
+        return
+
+    logger.info("推送模式已启动，周期：每 %g 分钟", args.interval)
     run_push_loop(args.interval, args.once)
 
 
