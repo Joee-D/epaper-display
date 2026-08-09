@@ -13,6 +13,23 @@ static GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> epd(
 constexpr uint8_t FULL_REFRESH_INTERVAL = 5;
 RTC_DATA_ATTR static uint8_t partialRefreshCount = FULL_REFRESH_INTERVAL;
 
+// Content change detection: remember a hash of the last bitmap actually drawn
+// so an identical frame (e.g. flat market, market closed) skips the expensive
+// e-paper redraw. lastDrawWasBitmap distinguishes "panel shows the bitmap"
+// from "panel shows a status message", so a message never gets overwritten
+// by a stale-hash skip.
+RTC_DATA_ATTR static uint32_t lastImageHash = 0;
+RTC_DATA_ATTR static bool lastDrawWasBitmap = false;
+
+static uint32_t fnv1a(const uint8_t *data, size_t len) {
+  uint32_t hash = 2166136261u;
+  while (len--) {
+    hash ^= *data++;
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
 static bool needsFullRefresh() {
   return partialRefreshCount >= FULL_REFRESH_INTERVAL;
 }
@@ -27,6 +44,8 @@ void displayInit(const DeviceConfig &cfg) {
 }
 
 void displayShowMessage(const String &line1, const String &line2) {
+  lastDrawWasBitmap = false;
+
   if (needsFullRefresh()) {
     epd.setFullWindow();
   } else {
@@ -129,6 +148,15 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
     return false;
   }
 
+  // Identical frame to the last one actually shown: nothing to redraw. This
+  // skips the ~2s panel refresh and avoids e-ink wear on every tick.
+  uint32_t hash = fnv1a(buf, EPD_IMAGE_BYTES);
+  if (lastDrawWasBitmap && lastImageHash != 0 && hash == lastImageHash) {
+    free(buf);
+    Serial.println("Image unchanged; skipping redraw");
+    return true;
+  }
+
   if (needsFullRefresh()) {
     epd.setFullWindow();
   } else {
@@ -141,6 +169,8 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
     epd.drawBitmap(0, 0, buf, EPD_WIDTH, EPD_HEIGHT, GxEPD_BLACK);
   } while (epd.nextPage());
 
+  lastImageHash = hash;
+  lastDrawWasBitmap = true;
   free(buf);
 
   if (needsFullRefresh()) {

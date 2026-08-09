@@ -28,6 +28,10 @@ firmware appends `:35000/epaper-display/image` automatically. Hold the ESP32
 BOOT button for three seconds while starting up to force the portal again.
 
 Set **Rotate display 180 degrees** to `1` if the panel is mounted upside down.
+Set **Keep WiFi across sleep for USB power** to `1` when the device is plugged
+into USB/mains: the firmware then uses light sleep and keeps the WiFi
+association between refreshes, so 1-minute updates skip the reconnect delay.
+Leave it `0` for battery use (deep sleep, WiFi off between updates).
 
 The endpoint is requested with `w=400`, `h=300`, and `id=<MAC address>`. It
 must return HTTP 200 and exactly 15,000 bytes: a 1-bit, MSB-first, row-major

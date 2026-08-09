@@ -6,6 +6,7 @@ struct DeviceConfig {
   String   serverIp;      // image server IP only, e.g. "192.168.1.50"
   uint32_t intervalMin;   // how often to wake up + fetch, in minutes
   bool     rotate180;     // flip image 180 degrees if the panel is mounted upside down
+  bool     keepWifi;      // mains-powered: keep WiFi on across light sleep to skip reconnects
 };
 
 // Keep timer wake-ups useful and prevent an invalid portal value from turning

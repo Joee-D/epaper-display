@@ -33,6 +33,7 @@ WiFiManager wm;
 WiFiManagerParameter paramServerIp("server", "Image server IP", "", 45);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
+WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi across sleep for USB power (1=USB, 0=battery)", "0", 1);
 
 String deviceId() {
   return WiFi.macAddress();
@@ -59,6 +60,7 @@ void saveConfigCallback() {
     cfg.intervalMin = 15;
   }
   cfg.rotate180 = String(paramRotate180.getValue()).toInt() != 0;
+  cfg.keepWifi  = String(paramKeepWifi.getValue()).toInt() != 0;
   configSave(cfg);
 }
 
@@ -69,9 +71,11 @@ void runProvisioningPortal(bool forced) {
   paramServerIp.setValue(cfg.serverIp.c_str(), 45);
   paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
   paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
+  paramKeepWifi.setValue(cfg.keepWifi ? "1" : "0", 1);
   wm.addParameter(&paramServerIp);
   wm.addParameter(&paramInterval);
   wm.addParameter(&paramRotate180);
+  wm.addParameter(&paramKeepWifi);
   wm.setSaveParamsCallback(saveConfigCallback);
   wm.setConfigPortalTimeout(300); // give up and retry later if nobody shows up
 
@@ -87,37 +91,38 @@ void runProvisioningPortal(bool forced) {
   }
 }
 
-void goToSleep() {
+void goToSleep(const DeviceConfig &cfg) {
   displayHibernate();
-  WiFi.mode(WIFI_OFF);
   uint64_t us = (uint64_t)cfg.intervalMin * 60ULL * 1000000ULL;
   esp_sleep_enable_timer_wakeup(us);
+
+  if (cfg.keepWifi) {
+    // Mains powered: light sleep and keep the WiFi association (modem sleep
+    // stays on) so the next cycle skips the reconnect. If the association is
+    // ever lost, runCycle() detects it and reconnects.
+    WiFi.setSleep(true);
+    esp_light_sleep_start();
+    return;  // resumes after the interval; runCycle() runs again
+  }
+
+  WiFi.mode(WIFI_OFF);
   esp_deep_sleep_start();
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(200);
-
-  configLoad(cfg);
+void runCycle() {
   displayInit(cfg);
 
   bool forcePortal = configButtonHeld();
 
-  // WiFiManager will silently reuse previously-saved WiFi credentials if
-  // they exist and connect fast; it only opens the captive portal if that
-  // fails or if the user held the config button.
-  wm.setConnectTimeout(15);
-
-  // A device with WiFi credentials but no image endpoint still needs the
-  // portal; otherwise it would only show an error until the BOOT button is
-  // held on a later wake-up.
+  // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
+  // WiFi down and reconnect here. In keepWifi mode the association survives
+  // light sleep, so WiFi.status() is already WL_CONNECTED and we skip it.
   if (forcePortal || cfg.serverIp.length() == 0) {
     runProvisioningPortal(true);
-  } else {
+  } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
-      displayShowMessage("WiFi connect failed", "Retrying after deep sleep");
-      goToSleep();
+      displayShowMessage("WiFi connect failed", "Retrying after sleep");
+      goToSleep(cfg);
       return;
     }
   }
@@ -131,9 +136,23 @@ void setup() {
     }
   }
 
-  goToSleep();
+  goToSleep(cfg);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  configLoad(cfg);
+
+  // WiFiManager will silently reuse previously-saved WiFi credentials if
+  // they exist and connect fast; it only opens the captive portal if that
+  // fails or if the user held the config button.
+  wm.setConnectTimeout(15);
 }
 
 void loop() {
-  // never reached — everything happens once per wake cycle in setup()
+  // Deep sleep never returns, so this runs once per wake; light sleep in
+  // keepWifi mode returns and loops back into the next cycle.
+  runCycle();
 }
