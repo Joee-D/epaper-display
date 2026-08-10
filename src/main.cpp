@@ -33,7 +33,7 @@ WiFiManager wm;
 WiFiManagerParameter paramServerIp("server", "Image server IP", "", 45);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
-WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi across sleep for USB power (1=USB, 0=battery)", "0", 1);
+WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi across sleep for USB power (1=USB, 0=battery)", "1", 1);
 
 String deviceId() {
   return WiFi.macAddress();
@@ -121,7 +121,6 @@ void runCycle() {
     runProvisioningPortal(true);
   } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
-      displayShowMessage("WiFi connect failed", "Retrying after sleep");
       goToSleep(cfg);
       return;
     }
@@ -146,9 +145,12 @@ void setup() {
   configLoad(cfg);
 
   // WiFiManager will silently reuse previously-saved WiFi credentials if
-  // they exist and connect fast; it only opens the captive portal if that
-  // fails or if the user held the config button.
+  // they exist and connect fast. Never auto-open the captive portal on a
+  // failed connect: the portal runs only when explicitly forced (config
+  // button) or on first boot (no server configured). A bad network must
+  // just sleep and retry next cycle instead of entering setup mode.
   wm.setConnectTimeout(15);
+  wm.setEnableConfigPortal(false);
 }
 
 void loop() {

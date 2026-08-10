@@ -35,7 +35,7 @@ void configLoad(DeviceConfig &cfg) {
   cfg.serverIp.trim();
   cfg.intervalMin = prefs.getUInt("interval_min", DEFAULT_INTERVAL_MIN);
   cfg.rotate180   = prefs.getBool("rotate180", false);
-  cfg.keepWifi    = prefs.getBool("keepwifi", false);
+  cfg.keepWifi    = prefs.getBool("keepwifi", true);
   prefs.end();
 
   cfg.intervalMin = normalizedInterval(cfg.intervalMin);
