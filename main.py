@@ -120,8 +120,10 @@ def fetch_prices(ticker):
             logger.warning("数据获取失败 (%s): 未返回行情数据", ticker)
             return None, None, None
         # 用轻量的 fast_info 获取前收和最新价，避免加载 obj.info 的大量公司元数据。
+        # regular_market_previous_close 基于官方日线，与 Yahoo 页面的 Previous Close
+        # 一致；previous_close 对近 24 小时交易的期货会取到盘中小时 bar，导致涨跌偏差。
         try:
-            prev_close = obj.fast_info.previous_close
+            prev_close = obj.fast_info.regular_market_previous_close
             latest_price = obj.fast_info.last_price
         except Exception:
             prev_close = None
