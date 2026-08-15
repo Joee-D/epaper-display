@@ -33,7 +33,7 @@ WiFiManager wm;
 WiFiManagerParameter paramServerIp("server", "Image server IP", "", 45);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
-WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi across sleep for USB power (1=USB, 0=battery)", "1", 1);
+WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi on between refreshes for USB power (1=USB, 0=battery)", "1", 1);
 
 String deviceId() {
   return WiFi.macAddress();
@@ -93,18 +93,22 @@ void runProvisioningPortal(bool forced) {
 
 void goToSleep(const DeviceConfig &cfg) {
   displayHibernate();
-  uint64_t us = (uint64_t)cfg.intervalMin * 60ULL * 1000000ULL;
-  esp_sleep_enable_timer_wakeup(us);
 
   if (cfg.keepWifi) {
-    // Mains powered: light sleep and keep the WiFi association (modem sleep
-    // stays on) so the next cycle skips the reconnect. If the association is
-    // ever lost, runCycle() detects it and reconnects.
+    // USB/mains powered: no power constraint, so keep the WiFi association
+    // alive by staying awake (modem sleep) between refreshes instead of
+    // sleeping. Light sleep here would power down the radio and silently drop
+    // the connection (ESP-IDF docs), after which the device could never fetch
+    // again — so a plain delay() is both simpler and reliable.
+    uint64_t ms = (uint64_t)cfg.intervalMin * 60ULL * 1000ULL;
     WiFi.setSleep(true);
-    esp_light_sleep_start();
-    return;  // resumes after the interval; runCycle() runs again
+    Serial.printf("Keeping WiFi on; next refresh in %u min\n", cfg.intervalMin);
+    delay((uint32_t)ms);
+    return;  // loop() runs runCycle() again with WiFi still connected
   }
 
+  uint64_t us = (uint64_t)cfg.intervalMin * 60ULL * 1000000ULL;
+  esp_sleep_enable_timer_wakeup(us);
   WiFi.mode(WIFI_OFF);
   esp_deep_sleep_start();
 }
@@ -115,8 +119,8 @@ void runCycle() {
   bool forcePortal = configButtonHeld();
 
   // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
-  // WiFi down and reconnect here. In keepWifi mode the association survives
-  // light sleep, so WiFi.status() is already WL_CONNECTED and we skip it.
+  // WiFi down and reconnect here. In keepWifi mode we stay awake between
+  // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
   if (forcePortal || cfg.serverIp.length() == 0) {
     runProvisioningPortal(true);
   } else if (WiFi.status() != WL_CONNECTED) {
@@ -142,6 +146,16 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
+  // Any restart that is not a scheduled deep-sleep wake-up — power-on, the
+  // EN/RESET button, a crash or a brownout — starts from a clean slate:
+  // erase saved config and WiFi credentials so the provisioning portal runs
+  // again. Battery-powered deep-sleep timer wakes are normal refresh cycles
+  // and keep the configuration.
+  if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+    Serial.println("Cold boot detected: resetting to factory defaults");
+    configFactoryReset();
+  }
+
   configLoad(cfg);
 
   // WiFiManager will silently reuse previously-saved WiFi credentials if
@@ -154,7 +168,8 @@ void setup() {
 }
 
 void loop() {
-  // Deep sleep never returns, so this runs once per wake; light sleep in
-  // keepWifi mode returns and loops back into the next cycle.
+  // Deep sleep never returns, so this runs once per wake; keepWifi mode
+  // stays awake between refreshes (delay in goToSleep) and loops back into
+  // the next cycle with the WiFi association intact.
   runCycle();
 }

@@ -59,5 +59,8 @@ void configFactoryReset() {
   prefs.clear();
   prefs.end();
 
+  // Ensure the WiFi stack is initialized before erasing credentials, as this
+  // is also called early in setup() on cold boots.
+  WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true); // erase stored WiFi creds too
 }

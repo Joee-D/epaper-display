@@ -27,11 +27,17 @@ and a refresh interval from 1 minute to 7 days. Only the IP is needed — the
 firmware appends `:35000/epaper-display/image` automatically. Hold the ESP32
 BOOT button for three seconds while starting up to force the portal again.
 
+Note: the device resets to factory defaults on every cold boot — a real
+power-on (unplug/replug), the EN/RESET button, or a crash. Config and saved
+Wi-Fi credentials are erased and the setup portal reopens, so re-enter them
+after each power-up. Battery-powered deep-sleep refreshes do not trigger a
+reset; only an actual power cycle does.
+
 Set **Rotate display 180 degrees** to `1` if the panel is mounted upside down.
-Set **Keep WiFi across sleep for USB power** to `1` when the device is plugged
-into USB/mains: the firmware then uses light sleep and keeps the WiFi
-association between refreshes, so 1-minute updates skip the reconnect delay.
-Leave it `0` for battery use (deep sleep, WiFi off between updates).
+Set **Keep WiFi on between refreshes for USB power** to `1` when the device is
+plugged into USB/mains: the firmware stays awake (WiFi modem sleep) between
+refreshes, so 1-minute updates skip the reconnect delay. Leave it `0` for
+battery use (deep sleep, WiFi off between updates).
 
 The endpoint is requested with `w=400`, `h=300`, and `id=<MAC address>`. It
 must return HTTP 200 and exactly 15,000 bytes: a 1-bit, MSB-first, row-major
