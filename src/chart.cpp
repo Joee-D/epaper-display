@@ -1,50 +1,47 @@
 #include "chart.h"
 
 #include <Adafruit_GFX.h>
-#include <Fonts/FreeSansBold18pt7b.h>
-#include <Fonts/FreeSansBold9pt7b.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "display.h"
+#include "fonts/ChartSansBold10.h"
+#include "fonts/ChartSansBold15.h"
+#include "fonts/ChartSansBold28.h"
 
 namespace {
 
 // GFXcanvas1 sets a bit for any non-zero colour and GxEPD2::drawBitmap() paints
-// a set bit in the colour it is given, so 1 = ink keeps both sides in the same
-// convention as the bitmap the image server used to send.
+// a set bit in the colour it is given, so 1 = ink keeps the framebuffer and the
+// panel driver in one convention.
 constexpr uint16_t INK = 1;
 constexpr uint16_t PAPER = 0;
 
-// Geometry measured from the server-side matplotlib figure (figsize 4x3 at
-// dpi 100, gridspec height_ratios [1, 2.2], tight_layout(pad=0.2)).
-constexpr float TEXT_X0 = 20.28f, TEXT_X1 = 379.72f;
-constexpr float TEXT_TOP = 2.78f, TEXT_BOTTOM = 88.31f;
+// Geometry measured from the server-side matplotlib figure that main.py used to
+// render (figsize 4x3 at dpi 100, gridspec height_ratios [1, 2.2],
+// tight_layout(pad=0.2)); the same layout is kept here.
 constexpr float CHART_X0 = 20.28f, CHART_X1 = 379.72f;
 constexpr float CHART_TOP = 94.48f, CHART_BOTTOM = 282.64f;
 constexpr float TEXT_LEFT = 27.47f;      // 0.02 of the text axes
-// 9pt bold caps are 12px tall, within a pixel of the server's 11pt text.
-constexpr float TITLE_TOP = 25.0f;       // baseline 37 in the matplotlib layout
-constexpr float PRICE_TOP = 59.0f;       // fontsize 20 at 0.05
-constexpr float BADGE_CENTER_Y = 69.5f;  // fontsize 11 at 0.15
-constexpr float BADGE_RIGHT = 372.5f;    // 0.98 of the text axes, right aligned
-constexpr int BADGE_PAD_X = 6;
-constexpr int BADGE_PAD_Y = 3;
+// Text placements measured from the matplotlib figure: the 11pt line sits on a
+// baseline at y=37 (11px caps), the 20pt price on one at y=84 (20px digits), and
+// the badge box (83x24 there) is right-aligned at x=377 with its centre at 71.5.
+constexpr float TITLE_TOP = 26.0f;
+constexpr float PRICE_TOP = 64.0f;
+constexpr float BADGE_CENTER_Y = 71.5f;
+constexpr float BADGE_RIGHT = 377.0f;
+// matplotlib pads the badge text, which carries a space on either side.
+constexpr int BADGE_PAD_X = 9;
+constexpr int BADGE_PAD_Y = 6;
 constexpr int TICK_LABEL_TOP = 288;      // just below the chart axes
 
 // matplotlib fades #fafafa -> #b0b0b0 moving away from the baseline.
 constexpr float FILL_LIGHT = 250.0f;
 constexpr float FILL_DARK = 176.0f;
 
-// Ordered 4x4 Bayer thresholds: a pixel turns black when its grey level is
-// below the threshold, which reproduces the server's dithered gradient without
-// keeping an 8-bit copy of the image around.
-const uint8_t BAYER4[4][4] = {
-    {0, 136, 34, 170},
-    {204, 68, 238, 102},
-    {51, 187, 17, 153},
-    {255, 119, 221, 85},
-};
+// Brightness below which a pixel is burnt to ink.
+constexpr float INK_THRESHOLD = 128.0f;
 
 GFXcanvas1 *gCanvas = nullptr;
 
@@ -115,10 +112,10 @@ const uint8_t *chartRender(const MarketSegment &segment,
   canvas.setTextColor(INK, PAPER);
 
   // ---- header -------------------------------------------------------------
-  canvas.setFont(&FreeSansBold9pt7b);
+  canvas.setFont(&ChartSansBold15);
   drawText(canvas, TEXT_LEFT, TITLE_TOP, segment.displayName);
 
-  canvas.setFont(&FreeSansBold18pt7b);
+  canvas.setFont(&ChartSansBold28);
   char priceText[32];
   formatPrice(series.price, priceText, sizeof(priceText));
   drawText(canvas, TEXT_LEFT, PRICE_TOP, priceText);
@@ -127,7 +124,7 @@ const uint8_t *chartRender(const MarketSegment &segment,
       (series.price - series.prevClose) / series.prevClose * 100.0f;
   char badgeText[24];
   snprintf(badgeText, sizeof(badgeText), "%+.2f%%", pct);
-  canvas.setFont(&FreeSansBold9pt7b);
+  canvas.setFont(&ChartSansBold15);
 
   int16_t boundsX, boundsY;
   uint16_t textWidth, textHeight;
@@ -183,8 +180,25 @@ const uint8_t *chartRender(const MarketSegment &segment,
         (uint8_t)lroundf(FILL_LIGHT + (FILL_DARK - FILL_LIGHT) * t);
   }
 
-  // Fill between the curve and the baseline, clipped to where the data ends.
-  for (int x = (int)CHART_X0; x <= (int)CHART_X1; ++x) {
+  // Fill between the curve and the baseline. The per-column span is worked out
+  // first so the diffusion pass below can run in raster order. The scratch space
+  // lives on the heap: the Arduino loop task only has an 8 KB stack.
+  struct FillScratch {
+    int16_t spanTop[EPD_WIDTH];
+    int16_t spanBottom[EPD_WIDTH];
+    float carried[EPD_WIDTH + 2];
+    float pending[EPD_WIDTH + 2];
+  };
+  FillScratch *scratch = (FillScratch *)calloc(1, sizeof(FillScratch));
+  if (scratch == nullptr) {
+    chartRelease();
+    return nullptr;
+  }
+
+  for (int x = 0; x < EPD_WIDTH; ++x) {
+    scratch->spanTop[x] = 1;
+    scratch->spanBottom[x] = 0;  // empty span until proven otherwise
+
     const float position =
         ((float)x - CHART_X0) / (CHART_X1 - CHART_X0) * (float)xMax;
     if (position < 0.0f || position > (float)(count - 1)) continue;
@@ -200,11 +214,38 @@ const uint8_t *chartRender(const MarketSegment &segment,
     int to = (int)lroundf(fmaxf(curveY, baselineY));
     if (from < chartTop) from = chartTop;
     if (to > chartBottom) to = chartBottom;
+    if (from > to) continue;
+    scratch->spanTop[x] = (int16_t)from;
+    scratch->spanBottom[x] = (int16_t)to;
+  }
 
-    for (int y = from; y <= to; ++y) {
-      if (grey[y] < BAYER4[y & 3][x & 3]) canvas.drawPixel(x, y, INK);
+  // Floyd-Steinberg error diffusion over the chart area, the same dithering the
+  // image server applied. An ordered matrix only offers a handful of density
+  // steps, which showed up as banding across a gradient this tall.
+  {
+    float *carried = scratch->carried;
+    float *pending = scratch->pending;
+    for (int y = chartTop; y <= chartBottom; ++y) {
+      for (int x = 0; x < EPD_WIDTH; ++x) {
+        const bool inFill = y >= scratch->spanTop[x] && y <= scratch->spanBottom[x];
+        const float target = inFill ? (float)grey[y] : 255.0f;
+        float value = target + carried[x + 1];
+        value = value < 0.0f ? 0.0f : (value > 255.0f ? 255.0f : value);
+        const bool ink = value < INK_THRESHOLD;
+        const float error = value - (ink ? 0.0f : 255.0f);
+        if (ink) canvas.drawPixel(x, y, INK);
+        carried[x + 2] += error * 7.0f / 16.0f;
+        pending[x] += error * 3.0f / 16.0f;
+        pending[x + 1] += error * 5.0f / 16.0f;
+        pending[x + 2] += error / 16.0f;
+      }
+      float *swap = carried;
+      carried = pending;
+      pending = swap;
+      memset(pending, 0, (EPD_WIDTH + 2) * sizeof(float));
     }
   }
+  free(scratch);
 
   // The session line itself, two pixels wide like matplotlib's linewidth 2.
   for (int i = 1; i < count; ++i) {
@@ -217,8 +258,7 @@ const uint8_t *chartRender(const MarketSegment &segment,
   }
 
   // ---- tick labels --------------------------------------------------------
-  // The built-in 5x7 font is the closest match to the server's 7pt labels.
-  canvas.setFont(nullptr);
+  canvas.setFont(&ChartSansBold10);
   for (int i = 0; i < segment.tickCount; ++i) {
     if (segment.ticks[i] > xMax) continue;
     drawTextCentered(canvas, chartX(segment.ticks[i], xMax), TICK_LABEL_TOP,
