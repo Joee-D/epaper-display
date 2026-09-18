@@ -1,6 +1,7 @@
 #include "market.h"
 
 #include <HTTPClient.h>
+#include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
 
@@ -25,7 +26,14 @@ namespace {
 
 constexpr const char *CHART_URL =
     "https://query1.finance.yahoo.com/v8/finance/chart/";
+constexpr const char *CHART_HOST = "query1.finance.yahoo.com";
 constexpr const char *ET_TZ = "EST5EDT,M3.2.0,M11.1.0";
+
+// Keep the User-Agent deliberately plain: Yahoo answers a UA that *claims* to be
+// a desktop browser from a non-browser TLS/HTTP fingerprint with 429 Too Many
+// Requests, while the same request with "Mozilla/5.0" is served normally
+// (measured with both UAs back to back from the same address).
+constexpr const char *QUOTE_USER_AGENT = "Mozilla/5.0";
 
 // Symbols such as "^ndx" and "NQ=F" carry characters that must be escaped to
 // stay valid inside a path segment.
@@ -45,6 +53,12 @@ String encodeSymbol(const char *symbol) {
 }
 
 bool httpGet(const String &url, String &body) {
+  Serial.println("Quote URL: " + url);
+  IPAddress resolved;
+  if (WiFi.hostByName(CHART_HOST, resolved)) {
+    Serial.println("Quote host resolves to " + resolved.toString());
+  }
+
   WiFiClientSecure client;
   // Public quote data: skip chain validation so certificate rotation at
   // Yahoo's CDN cannot require a reflash.
@@ -54,8 +68,8 @@ bool httpGet(const String &url, String &body) {
   HTTPClient http;
   http.setConnectTimeout(15000);
   http.setTimeout(20000);
-  http.setUserAgent("Mozilla/5.0");
-  http.addHeader("Accept-Encoding", "identity");
+  http.setUserAgent(QUOTE_USER_AGENT);
+  http.addHeader("Accept", "*/*");
   if (!http.begin(client, url)) {
     Serial.println("Quote fetch failed: bad URL");
     return false;
@@ -63,7 +77,15 @@ bool httpGet(const String &url, String &body) {
 
   const int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    Serial.printf("Quote fetch failed: HTTP %d\n", code);
+    Serial.printf("Quote fetch failed: HTTP %d %s\n", code,
+                  http.errorToString(code).c_str());
+    const String server = http.header("Server");
+    if (server.length() > 0) Serial.println("Quote Server header: " + server);
+    String reason = http.getString();
+    if (reason.length() > 300) reason = reason.substring(0, 300);
+    reason.replace("\n", " ");
+    reason.replace("\r", "");
+    if (reason.length() > 0) Serial.println("Quote error body: " + reason);
     http.end();
     return false;
   }
