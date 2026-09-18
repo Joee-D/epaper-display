@@ -11,8 +11,8 @@
 #define EPD_WIDTH  400
 #define EPD_HEIGHT 300
 
-// Expected raw image payload size the server must return:
-// 1 bit per pixel, packed MSB-first, row-major, no padding between rows.
+// Expected raw framebuffer size: 1 bit per pixel, packed MSB-first,
+// row-major, no padding between rows.
 #define EPD_IMAGE_BYTES ((EPD_WIDTH * EPD_HEIGHT) / 8)
 
 // ---------------------------------------------------------------------------
@@ -36,13 +36,9 @@
 // Initializes the panel using the configured orientation.
 void displayInit(const DeviceConfig &cfg);
 
-// Downloads the raw 1bpp bitmap from the configured image server and draws it
-// full-screen. Returns true on success.
-bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId);
-
-// Draws an already-rendered 400x300 1bpp bitmap (bit set = black) full-screen,
-// skipping the redraw when the frame is identical to the last one shown. The
-// caller keeps ownership of `bitmap`. Returns true on success.
+// Draws a 400x300 1bpp bitmap (bit set = black) full-screen, skipping the
+// redraw when the frame is identical to the last one shown. The caller keeps
+// ownership of `bitmap`. Returns true on success.
 bool displayShowBitmap(const uint8_t *bitmap);
 
 // Draws a simple centered two-line status/error message (used for setup

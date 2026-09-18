@@ -1,18 +1,15 @@
 // epaper-display
 // ---------------------------------------------------------------------------
-// A minimal, self-contained ESP32 + e-ink firmware inspired by
+// A self-contained ESP32 + e-ink firmware inspired by
 // https://github.com/datascale-ai/inksight :
 //   1. First boot (or held config button) -> WiFi captive-portal provisioning
-//      page (SSID/password + your image server URL + refresh interval).
-//   2. Every wake-up: connect WiFi, GET a pre-rendered 1bpp bitmap from your
-//      server, draw it full-screen, then deep-sleep until the next cycle.
+//      page (SSID/password + refresh interval).
+//   2. Every wake-up: connect WiFi, pick the market session that is open right
+//      now, fetch its quotes, draw the chart on the device, push it to the
+//      panel, then deep-sleep until the next cycle.
 //
-// This firmware does NOT try to reproduce InkSight's 24 built-in modes /
-// backend / mode plaza — it's a lightweight "pull an image from any server
-// on a schedule" client, so you can point it at your own backend, a Home
-// Assistant dashboard renderer, a cron job that renders a PNG, etc.
-// See server_example/app.py for a minimal Flask server implementing the
-// expected image protocol.
+// No backend is involved: quotes come from Yahoo Finance and the chart is
+// rendered locally (see src/market.* and src/chart.*).
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
@@ -29,18 +26,10 @@ DeviceConfig cfg;
 WiFiManager wm;
 
 // Custom fields shown on the WiFiManager config portal, alongside the
-// built-in SSID/password fields. Only the server IP is entered here; the
-// scheme, port, and endpoint path are filled in automatically by
-// buildServerUrl().
-WiFiManagerParameter paramServerIp("server", "Image server IP", "", 45);
+// built-in SSID/password fields.
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
 WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi on between refreshes for USB power (1=USB, 0=battery)", "1", 1);
-WiFiManagerParameter paramLocal("localmarket", "Chart source (1=device draws it, 0=my image server)", "1", 1);
-
-String deviceId() {
-  return WiFi.macAddress();
-}
 
 bool configButtonHeld() {
   pinMode(PIN_CONFIG_BUTTON, INPUT_PULLUP);
@@ -56,7 +45,6 @@ bool configButtonHeld() {
 }
 
 void saveConfigCallback() {
-  cfg.serverIp    = paramServerIp.getValue();
   cfg.intervalMin = String(paramInterval.getValue()).toInt();
   if (cfg.intervalMin < MIN_REFRESH_INTERVAL_MIN ||
       cfg.intervalMin > MAX_REFRESH_INTERVAL_MIN) {
@@ -64,7 +52,6 @@ void saveConfigCallback() {
   }
   cfg.rotate180 = String(paramRotate180.getValue()).toInt() != 0;
   cfg.keepWifi  = String(paramKeepWifi.getValue()).toInt() != 0;
-  cfg.localMarket = String(paramLocal.getValue()).toInt() != 0;
   configSave(cfg);
 }
 
@@ -72,16 +59,12 @@ void runProvisioningPortal(bool forced) {
   displayShowMessage("Setup mode",
                       "Join WiFi \"epaper-display-Setup\" then open 192.168.4.1");
 
-  paramServerIp.setValue(cfg.serverIp.c_str(), 45);
   paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
   paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
   paramKeepWifi.setValue(cfg.keepWifi ? "1" : "0", 1);
-  paramLocal.setValue(cfg.localMarket ? "1" : "0", 1);
-  wm.addParameter(&paramServerIp);
   wm.addParameter(&paramInterval);
   wm.addParameter(&paramRotate180);
   wm.addParameter(&paramKeepWifi);
-  wm.addParameter(&paramLocal);
   wm.setSaveParamsCallback(saveConfigCallback);
   wm.setConfigPortalTimeout(300); // give up and retry later if nobody shows up
 
@@ -120,9 +103,8 @@ void goToSleep(const DeviceConfig &cfg) {
 }
 
 // Fetches the active market's quotes from Yahoo Finance, draws the chart on the
-// device and pushes it to the panel — no image server involved. Transient
-// failures leave the last chart on the panel, exactly like the server's 503
-// behaviour used to.
+// device and pushes it to the panel. Transient failures leave the last chart on
+// the panel instead of replacing it with an error page.
 void displayLocalChart() {
   if (!marketSyncTime()) {
     Serial.println("Local chart skipped: clock not set");
@@ -166,13 +148,10 @@ void runCycle() {
 
   bool forcePortal = configButtonHeld();
 
-  const bool needsSetup =
-      !cfg.provisioned || (!cfg.localMarket && cfg.serverIp.length() == 0);
-
   // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
   // WiFi down and reconnect here. In keepWifi mode we stay awake between
   // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
-  if (forcePortal || needsSetup) {
+  if (forcePortal || !cfg.provisioned) {
     runProvisioningPortal(true);
   } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
@@ -182,14 +161,7 @@ void runCycle() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (cfg.localMarket) {
-      displayLocalChart();
-    } else if (cfg.serverIp.length() == 0) {
-      displayShowMessage("No server configured",
-                          "Hold BOOT button 3s to open setup");
-    } else {
-      displayFetchAndShow(cfg, deviceId());
-    }
+    displayLocalChart();
   }
 
   goToSleep(cfg);

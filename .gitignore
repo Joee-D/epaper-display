@@ -1,6 +1,9 @@
 # PlatformIO build output
 .pio/
 
+# PlatformIO IDE regenerates these and they embed absolute local paths
+.vscode/
+
 # Python bytecode from running src/main.py locally
 __pycache__/
 
