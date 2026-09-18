@@ -134,13 +134,7 @@ void displayLocalChart() {
   Serial.printf("Local chart: %s %+.2f%% (%d points)\n", segment->displayName,
                 pct, series.count);
 
-  const uint8_t *bitmap = chartRender(*segment, series);
-  if (bitmap == nullptr) {
-    Serial.println("Local chart failed: render buffer unavailable");
-    return;
-  }
-  displayShowBitmap(bitmap);
-  chartRelease();
+  chartDisplay(*segment, series);
 }
 
 void runCycle() {

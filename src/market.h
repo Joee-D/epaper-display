@@ -19,7 +19,6 @@ struct MarketSegment {
 
 // One session of intraday closes plus the baseline the chart compares against.
 struct MarketSeries {
-  bool  valid;
   float price;      // latest price (meta.regularMarketPrice)
   float prevClose;  // official previous close (meta.previousClose)
   int   count;
@@ -27,7 +26,6 @@ struct MarketSeries {
 };
 
 extern const MarketSegment MARKET_SEGMENTS[];
-extern const int MARKET_SEGMENT_COUNT;
 
 // Points the clock at NTP and applies the ET timezone. False if the clock could
 // not be set, in which case market windows cannot be evaluated.

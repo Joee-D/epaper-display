@@ -19,9 +19,6 @@ const MarketSegment MARKET_SEGMENTS[] = {
      {0, 60, 119}, {"09:30", "13:00", "15:00"}},
 };
 
-const int MARKET_SEGMENT_COUNT =
-    sizeof(MARKET_SEGMENTS) / sizeof(MARKET_SEGMENTS[0]);
-
 namespace {
 
 constexpr const char *CHART_URL =
@@ -118,13 +115,10 @@ bool marketNow(struct tm &nowEt) {
 
 const MarketSegment *marketActiveSegment(const struct tm &nowEt) {
   const int minute = minutesOfDay(nowEt);
-  for (int i = 0; i < MARKET_SEGMENT_COUNT; ++i) {
-    const MarketSegment &segment = MARKET_SEGMENTS[i];
-    if (segment.startMinute > segment.endMinute) {
-      if (minute >= segment.startMinute || minute < segment.endMinute) {
-        return &segment;
-      }
-    } else if (minute >= segment.startMinute && minute < segment.endMinute) {
+  for (const MarketSegment &segment : MARKET_SEGMENTS) {
+    const bool wraps = segment.startMinute > segment.endMinute;
+    if (wraps ? (minute >= segment.startMinute || minute < segment.endMinute)
+              : (minute >= segment.startMinute && minute < segment.endMinute)) {
       return &segment;
     }
   }
@@ -132,7 +126,6 @@ const MarketSegment *marketActiveSegment(const struct tm &nowEt) {
 }
 
 bool marketFetchSeries(const MarketSegment &segment, MarketSeries &out) {
-  out.valid = false;
   out.count = 0;
 
   String url = CHART_URL;
@@ -191,6 +184,5 @@ bool marketFetchSeries(const MarketSegment &segment, MarketSeries &out) {
   out.price = price;
   out.prevClose = prevClose;
   out.count = count;
-  out.valid = true;
   return true;
 }
