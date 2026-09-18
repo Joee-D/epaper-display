@@ -166,12 +166,13 @@ void runCycle() {
 
   bool forcePortal = configButtonHeld();
 
-  const bool needsServerIp = !cfg.localMarket && cfg.serverIp.length() == 0;
+  const bool needsSetup =
+      !cfg.provisioned || (!cfg.localMarket && cfg.serverIp.length() == 0);
 
   // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
   // WiFi down and reconnect here. In keepWifi mode we stay awake between
   // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
-  if (forcePortal || needsServerIp) {
+  if (forcePortal || needsSetup) {
     runProvisioningPortal(true);
   } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
@@ -198,23 +199,13 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // Any restart that is not a scheduled deep-sleep wake-up — power-on, the
-  // EN/RESET button, a crash or a brownout — starts from a clean slate:
-  // erase saved config and WiFi credentials so the provisioning portal runs
-  // again. Battery-powered deep-sleep timer wakes are normal refresh cycles
-  // and keep the configuration.
-  if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
-    Serial.println("Cold boot detected: resetting to factory defaults");
-    configFactoryReset();
-  }
-
   configLoad(cfg);
 
-  // WiFiManager will silently reuse previously-saved WiFi credentials if
-  // they exist and connect fast. Never auto-open the captive portal on a
-  // failed connect: the portal runs only when explicitly forced (config
-  // button) or on first boot (no server configured). A bad network must
-  // just sleep and retry next cycle instead of entering setup mode.
+  // The saved configuration survives power cycles; the provisioning portal is
+  // reached by holding the BOOT button (see runCycle()). WiFiManager likewise
+  // reuses the stored WiFi credentials. Never auto-open the captive portal on
+  // a failed connect: a bad network must just sleep and retry next cycle
+  // instead of entering setup mode.
   wm.setConnectTimeout(15);
   wm.setEnableConfigPortal(false);
 }

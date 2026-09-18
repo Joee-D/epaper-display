@@ -1,6 +1,5 @@
 #include "config.h"
 #include <Preferences.h>
-#include <WiFi.h>
 
 static const char *NS = "epaper-display";
 
@@ -37,6 +36,7 @@ void configLoad(DeviceConfig &cfg) {
   cfg.rotate180   = prefs.getBool("rotate180", false);
   cfg.keepWifi    = prefs.getBool("keepwifi", true);
   cfg.localMarket = prefs.getBool("local_market", true);
+  cfg.provisioned = prefs.getBool("provisioned", false);
   prefs.end();
 
   cfg.intervalMin = normalizedInterval(cfg.intervalMin);
@@ -52,17 +52,6 @@ void configSave(const DeviceConfig &cfg) {
   prefs.putBool("rotate180", cfg.rotate180);
   prefs.putBool("keepwifi", cfg.keepWifi);
   prefs.putBool("local_market", cfg.localMarket);
+  prefs.putBool("provisioned", true);
   prefs.end();
-}
-
-void configFactoryReset() {
-  Preferences prefs;
-  prefs.begin(NS, false);
-  prefs.clear();
-  prefs.end();
-
-  // Ensure the WiFi stack is initialized before erasing credentials, as this
-  // is also called early in setup() on cold boots.
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true); // erase stored WiFi creds too
 }

@@ -10,6 +10,8 @@ struct DeviceConfig {
                           // association survives and reconnects are skipped
   bool     localMarket;   // fetch quotes and draw the chart on the device itself,
                           // instead of pulling a rendered bitmap from a server
+  bool     provisioned;   // false until the setup portal has been saved once, so
+                          // a fresh device opens it and later boots do not
 };
 
 // Keep timer wake-ups useful and prevent an invalid portal value from turning
@@ -31,8 +33,3 @@ void configLoad(DeviceConfig &cfg);
 
 // Persists config to flash.
 void configSave(const DeviceConfig &cfg);
-
-// Erases saved config AND saved WiFi credentials, forcing the setup portal
-// to run again on next boot. Called automatically on every cold boot (power
-// on, EN/reset, crash), so each power-up starts from factory defaults.
-void configFactoryReset();
