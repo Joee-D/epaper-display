@@ -119,15 +119,29 @@ def fetch_prices(ticker):
         if df.empty:
             logger.warning("数据获取失败 (%s): 未返回行情数据", ticker)
             return None, None, None
-        # 用轻量的 fast_info 获取前收和最新价，避免加载 obj.info 的大量公司元数据。
-        # regular_market_previous_close 基于官方日线，与 Yahoo 页面的 Previous Close
-        # 一致；previous_close 对近 24 小时交易的期货会取到盘中小时 bar，导致涨跌偏差。
+        # 最新价用轻量的 fast_info，避免加载 obj.get_info() 的大量公司元数据。
         try:
-            prev_close = obj.fast_info.regular_market_previous_close
             latest_price = obj.fast_info.last_price
         except Exception:
-            prev_close = None
             latest_price = None
+        # 前收必须取自报价接口的 regularMarketPreviousClose，它才等于 Yahoo 网页上的
+        # "Previous Close"。fast_info.regular_market_previous_close 取的是日线倒数第二
+        # 根 bar 的收盘价，对近 24 小时交易的期货（NQ=F）用的是另一种日切分点，比网页
+        # 的结算价低约 1%，会把涨跌幅放大 1 个百分点。
+        try:
+            quote_info = obj.get_info()
+            prev_close = (
+                quote_info.get("regularMarketPreviousClose")
+                or quote_info.get("previousClose")
+            )
+        except Exception:
+            prev_close = None
+        if not prev_close or prev_close <= 0:
+            # 报价接口不可用时的退路；对期货仍可能有约 1% 的偏差。
+            try:
+                prev_close = obj.fast_info.regular_market_previous_close
+            except Exception:
+                prev_close = None
         if not prev_close or prev_close <= 0:
             prev_close = df["Open"].iloc[0]
         prices = df["Close"].dropna().values
