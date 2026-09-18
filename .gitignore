@@ -1,0 +1,8 @@
+# PlatformIO build output
+.pio/
+
+# Python bytecode from running src/main.py locally
+__pycache__/
+
+# Charts archived by push mode (see README)
+*_trend.png

@@ -1,8 +1,9 @@
 # epaper-display
 
 ESP32 firmware for a Waveshare 4.2-inch V2 e-paper panel. It provisions Wi-Fi
-and an image endpoint through a captive portal, downloads a 400×300 1-bit raw
-bitmap on each wake-up, displays it, then deep-sleeps until the next refresh.
+through a captive portal, fetches quotes and draws the market chart on the
+device itself on each wake-up (or pulls a pre-rendered 400×300 1-bit bitmap from
+your own image server, if you prefer), then deep-sleeps until the next refresh.
 
 <img width="1920" height="1080" alt="IMG_3356" src="https://github.com/user-attachments/assets/dac1687e-7988-471f-b88c-2f2b705c35dc" />
 
@@ -22,10 +23,13 @@ Adjust the pin definitions before flashing if your display is wired differently.
 ## First setup
 
 On first boot, join the `epaper-display-Setup` Wi-Fi network and open
-`http://192.168.4.1`. Enter Wi-Fi credentials, the image server's IP address,
-and a refresh interval from 1 minute to 7 days. Only the IP is needed — the
-firmware appends `:35000/epaper-display/image` automatically. Hold the ESP32
-BOOT button for three seconds while starting up to force the portal again.
+`http://192.168.4.1`. Enter Wi-Fi credentials, the refresh interval (1 minute to
+7 days) and the chart source. Set **Chart source** to `1` to let the device fetch
+quotes and draw the chart itself (the default, no server needed) or to `0` to
+pull a rendered bitmap from your image server — in that case enter the server's
+IP too, and the firmware appends `:35000/epaper-display/image` automatically.
+Hold the ESP32 BOOT button for three seconds while starting up to force the
+portal again.
 
 Note: the device resets to factory defaults on every cold boot — a real
 power-on (unplug/replug), the EN/RESET button, or a crash. Config and saved
@@ -42,14 +46,53 @@ battery use (deep sleep, WiFi off between updates).
 The endpoint is requested with `w=400`, `h=300`, and `id=<MAC address>`. It
 must return HTTP 200 and exactly 15,000 bytes: a 1-bit, MSB-first, row-major
 bitmap with no row padding. Responses may use either `Content-Length` or HTTP
-chunked transfer encoding.
+chunked transfer encoding. This applies to server mode only.
 
 The panel performs one full refresh after every five partial updates to reduce
 e-ink ghosting.
 
-## Chart server modes
+## On-device chart mode
 
-`src/main.py` supports two operating modes:
+With **Chart source = 1** (the default) no backend is involved. Every wake-up the
+firmware:
+
+1. syncs the clock over NTP and applies the `America/New_York` timezone;
+2. picks the session that is open right now, using the same windows as
+   `src/main.py`:
+
+   | Segment   | Symbol      | ET window   | Chart title                     |
+   |-----------|-------------|-------------|---------------------------------|
+   | Premarket | `NQ=F`      | 00:00–09:30 | NASDAQ FUTURES                  |
+   | Regular   | `^ndx`      | 09:30–17:40 | NASDAQ 100                      |
+   | Evening   | `930955.SS` | 21:30–00:00 | CSI Dividend Low Volatility 100 |
+
+3. downloads that session from Yahoo Finance —
+   `https://query1.finance.yahoo.com/v8/finance/chart/<symbol>?range=1d&interval=2m`,
+   a single HTTPS GET of roughly 13–17 KB — and takes the latest price and the
+   official previous close straight from the response's `meta` block, which is
+   what makes the percentage agree with Yahoo's own page;
+4. renders the chart into a 400×300 1-bit framebuffer (`src/chart.cpp`) and
+   pushes it to the panel.
+
+While every market is closed, or when the quote fetch or the render fails, the
+panel keeps the last image rather than showing an error page — the behaviour the
+server mode had.
+
+Notes:
+
+- The TLS connection is **not** certificate-validated (`setInsecure()`): the
+  quotes are public data, and skipping validation keeps the firmware working
+  when the CDN rotates its CA.
+- The layout mirrors the matplotlib figure `src/main.py` renders, with the
+  gradient reproduced through ordered (Bayer) dithering. Text uses the bundled
+  FreeSansBold GLCD fonts, so there are no CJK glyphs.
+- PlatformIO reports ~1.09 MB flash (83% of the default 1.25 MB app partition)
+  and ~64 KB of static RAM; drawing needs a 15 KB heap buffer on top.
+
+## Chart server modes (optional)
+
+With **Chart source = 0** the device pulls a rendered bitmap instead.
+`src/main.py` draws it with matplotlib and supports two operating modes:
 
 - **Service mode** exposes the raw 400×300 bitmap endpoint for this firmware
   to pull on its own refresh schedule:

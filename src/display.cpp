@@ -148,11 +148,18 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
     return false;
   }
 
+  const bool shown = displayShowBitmap(buf);
+  free(buf);
+  return shown;
+}
+
+bool displayShowBitmap(const uint8_t *bitmap) {
+  if (bitmap == nullptr) return false;
+
   // Identical frame to the last one actually shown: nothing to redraw. This
   // skips the ~2s panel refresh and avoids e-ink wear on every tick.
-  uint32_t hash = fnv1a(buf, EPD_IMAGE_BYTES);
+  uint32_t hash = fnv1a(bitmap, EPD_IMAGE_BYTES);
   if (lastDrawWasBitmap && lastImageHash != 0 && hash == lastImageHash) {
-    free(buf);
     Serial.println("Image unchanged; skipping redraw");
     return true;
   }
@@ -166,12 +173,11 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
   epd.firstPage();
   do {
     epd.fillScreen(GxEPD_WHITE);
-    epd.drawBitmap(0, 0, buf, EPD_WIDTH, EPD_HEIGHT, GxEPD_BLACK);
+    epd.drawBitmap(0, 0, bitmap, EPD_WIDTH, EPD_HEIGHT, GxEPD_BLACK);
   } while (epd.nextPage());
 
   lastImageHash = hash;
   lastDrawWasBitmap = true;
-  free(buf);
 
   if (needsFullRefresh()) {
     partialRefreshCount = 0;

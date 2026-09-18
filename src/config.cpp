@@ -36,6 +36,7 @@ void configLoad(DeviceConfig &cfg) {
   cfg.intervalMin = prefs.getUInt("interval_min", DEFAULT_INTERVAL_MIN);
   cfg.rotate180   = prefs.getBool("rotate180", false);
   cfg.keepWifi    = prefs.getBool("keepwifi", true);
+  cfg.localMarket = prefs.getBool("local_market", true);
   prefs.end();
 
   cfg.intervalMin = normalizedInterval(cfg.intervalMin);
@@ -50,6 +51,7 @@ void configSave(const DeviceConfig &cfg) {
   prefs.putUInt("interval_min", normalizedInterval(cfg.intervalMin));
   prefs.putBool("rotate180", cfg.rotate180);
   prefs.putBool("keepwifi", cfg.keepWifi);
+  prefs.putBool("local_market", cfg.localMarket);
   prefs.end();
 }
 

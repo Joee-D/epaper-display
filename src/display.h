@@ -40,6 +40,11 @@ void displayInit(const DeviceConfig &cfg);
 // full-screen. Returns true on success.
 bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId);
 
+// Draws an already-rendered 400x300 1bpp bitmap (bit set = black) full-screen,
+// skipping the redraw when the frame is identical to the last one shown. The
+// caller keeps ownership of `bitmap`. Returns true on success.
+bool displayShowBitmap(const uint8_t *bitmap);
+
 // Draws a simple centered two-line status/error message (used for setup
 // mode, WiFi failures, fetch failures, etc.) so the screen is never blank.
 void displayShowMessage(const String &line1, const String &line2);

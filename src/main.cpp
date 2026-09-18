@@ -20,8 +20,10 @@
 #include <WiFiManager.h>
 #include <esp_sleep.h>
 
+#include "chart.h"
 #include "config.h"
 #include "display.h"
+#include "market.h"
 
 DeviceConfig cfg;
 WiFiManager wm;
@@ -34,6 +36,7 @@ WiFiManagerParameter paramServerIp("server", "Image server IP", "", 45);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
 WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi on between refreshes for USB power (1=USB, 0=battery)", "1", 1);
+WiFiManagerParameter paramLocal("localmarket", "Chart source (1=device draws it, 0=my image server)", "1", 1);
 
 String deviceId() {
   return WiFi.macAddress();
@@ -61,6 +64,7 @@ void saveConfigCallback() {
   }
   cfg.rotate180 = String(paramRotate180.getValue()).toInt() != 0;
   cfg.keepWifi  = String(paramKeepWifi.getValue()).toInt() != 0;
+  cfg.localMarket = String(paramLocal.getValue()).toInt() != 0;
   configSave(cfg);
 }
 
@@ -72,10 +76,12 @@ void runProvisioningPortal(bool forced) {
   paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
   paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
   paramKeepWifi.setValue(cfg.keepWifi ? "1" : "0", 1);
+  paramLocal.setValue(cfg.localMarket ? "1" : "0", 1);
   wm.addParameter(&paramServerIp);
   wm.addParameter(&paramInterval);
   wm.addParameter(&paramRotate180);
   wm.addParameter(&paramKeepWifi);
+  wm.addParameter(&paramLocal);
   wm.setSaveParamsCallback(saveConfigCallback);
   wm.setConfigPortalTimeout(300); // give up and retry later if nobody shows up
 
@@ -113,15 +119,59 @@ void goToSleep(const DeviceConfig &cfg) {
   esp_deep_sleep_start();
 }
 
+// Fetches the active market's quotes from Yahoo Finance, draws the chart on the
+// device and pushes it to the panel — no image server involved. Transient
+// failures leave the last chart on the panel, exactly like the server's 503
+// behaviour used to.
+void displayLocalChart() {
+  if (!marketSyncTime()) {
+    Serial.println("Local chart skipped: clock not set");
+    displayShowMessage("Clock not set", "NTP unreachable; retrying next cycle");
+    return;
+  }
+
+  struct tm nowEt;
+  if (!marketNow(nowEt)) {
+    Serial.println("Local chart skipped: clock not set");
+    return;
+  }
+
+  const MarketSegment *segment = marketActiveSegment(nowEt);
+  if (segment == nullptr) {
+    Serial.println("Local chart skipped: every market is closed");
+    return;
+  }
+  Serial.printf("Local chart: %s (%s) at %02d:%02d ET\n", segment->name,
+                segment->symbol, nowEt.tm_hour, nowEt.tm_min);
+
+  MarketSeries series;
+  if (!marketFetchSeries(*segment, series)) return;
+
+  const float pct =
+      (series.price - series.prevClose) / series.prevClose * 100.0f;
+  Serial.printf("Local chart: %s %+.2f%% (%d points)\n", segment->displayName,
+                pct, series.count);
+
+  const uint8_t *bitmap = chartRender(*segment, series);
+  if (bitmap == nullptr) {
+    Serial.println("Local chart failed: render buffer unavailable");
+    return;
+  }
+  displayShowBitmap(bitmap);
+  chartRelease();
+}
+
 void runCycle() {
   displayInit(cfg);
 
   bool forcePortal = configButtonHeld();
 
+  const bool needsServerIp = !cfg.localMarket && cfg.serverIp.length() == 0;
+
   // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
   // WiFi down and reconnect here. In keepWifi mode we stay awake between
   // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
-  if (forcePortal || cfg.serverIp.length() == 0) {
+  if (forcePortal || needsServerIp) {
     runProvisioningPortal(true);
   } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
@@ -131,7 +181,9 @@ void runCycle() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (cfg.serverIp.length() == 0) {
+    if (cfg.localMarket) {
+      displayLocalChart();
+    } else if (cfg.serverIp.length() == 0) {
       displayShowMessage("No server configured",
                           "Hold BOOT button 3s to open setup");
     } else {

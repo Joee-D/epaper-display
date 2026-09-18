@@ -8,6 +8,8 @@ struct DeviceConfig {
   bool     rotate180;     // flip image 180 degrees if the panel is mounted upside down
   bool     keepWifi;      // mains-powered: stay awake between refreshes so the WiFi
                           // association survives and reconnects are skipped
+  bool     localMarket;   // fetch quotes and draw the chart on the device itself,
+                          // instead of pulling a rendered bitmap from a server
 };
 
 // Keep timer wake-ups useful and prevent an invalid portal value from turning
