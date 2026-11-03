@@ -3,12 +3,11 @@ import argparse
 import logging
 import os
 import threading
-import time
-from bisect import bisect_left
-from datetime import datetime, time as datetime_time, timedelta
+from datetime import datetime, time as datetime_time
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -22,49 +21,23 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import requests
 import yfinance as yf
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 import pytz
 
-# ==================== 配置 ====================
-# 推送模式的凭证应通过环境变量提供，避免把设备密钥提交到代码库。
-API_KEY = os.getenv("ZECTRIX_API_KEY", "")
-DEVICE_ID = os.getenv("ZECTRIX_DEVICE_ID", "")
-PUSH_URL = (
-    f"https://cloud.zectrix.com/open/v1/devices/{DEVICE_ID}/display/image"
-    if DEVICE_ID
-    else ""
-)
-
 EPD_WIDTH = 400
 EPD_HEIGHT = 300
 EPD_IMAGE_BYTES = EPD_WIDTH * EPD_HEIGHT // 8
 IMAGE_CACHE_TTL_SECONDS = 60
-PUSH_REQUEST_TIMEOUT_SECONDS = 30
-
-
-def env_positive_interval(name, default):
-    """Read an optional positive interval from the environment."""
-    try:
-        value = float(os.getenv(name, str(default)))
-        return value if value > 0 else default
-    except ValueError:
-        return default
-
-
-DEFAULT_PUSH_INTERVAL_MINUTES = env_positive_interval("PUSH_INTERVAL_MINUTES", 15)
 
 app = Flask(__name__)
 _image_cache = {"payload": None, "created_at": None, "segment": None}
 _image_lock = threading.Lock()
 _render_lock = threading.Lock()
 
-ET = pytz.timezone("America/New_York")
 DISPLAY_TZ = pytz.timezone(os.getenv("DISPLAY_TIMEZONE", "Asia/Shanghai"))
-BAR_INTERVAL = timedelta(minutes=2)
 
 TIME_SEGMENTS = [
     {
@@ -73,11 +46,9 @@ TIME_SEGMENTS = [
         "display_name": "NASDAQ FUTURES",
         "market_timezone": "America/New_York",
         "active_windows": [("00:00", "09:30")],
-        "data_windows": [("00:00", "09:30")],
+        "xticks": [0, 150, 285],
         "axis_times": ["00:00", "05:00", "09:30"],
-        "prepost": True,
         "display_priority": 1,
-        "output_file": "nq_trend.png",
     },
     {
         "name": "Regular",
@@ -86,11 +57,9 @@ TIME_SEGMENTS = [
         "market_timezone": "America/New_York",
         # Keep the last regular-session chart visible briefly after the close.
         "active_windows": [("09:30", "17:40")],
-        "data_windows": [("09:30", "16:00")],
+        "xticks": [0, 105, 195],
         "axis_times": ["09:30", "13:00", "16:00"],
-        "prepost": False,
         "display_priority": 2,
-        "output_file": "ndx_trend.png",
     },
     {
         "name": "Evening",
@@ -98,13 +67,11 @@ TIME_SEGMENTS = [
         "display_name": "CSI Dividend Low Volatility 100",
         "market_timezone": "Asia/Shanghai",
         "active_windows": [("09:30", "11:30"), ("13:00", "15:00")],
-        "data_windows": [("09:30", "11:30"), ("13:00", "15:00")],
+        "xticks": [0, 60, 119],
         "axis_times": ["09:30", "13:00", "15:00"],
-        "prepost": False,
         # A-share afternoon overlaps the U.S. premarket in Beijing time. Prefer
         # the local market so both markets still get a visible update each day.
         "display_priority": 3,
-        "output_file": "sse_trend.png",
     },
 ]
 
@@ -138,62 +105,14 @@ def is_trading_now(config, now=None):
     )
 
 
-def session_bounds(market_tz, now_market, start_text, end_text):
-    """Return timezone-aware bounds for the session containing or ending today."""
-    start_clock = parse_clock(start_text)
-    end_clock = parse_clock(end_text)
-    day = now_market.date()
-
-    if start_clock > end_clock and now_market.time() < end_clock:
-        day -= timedelta(days=1)
-
-    start = market_tz.localize(datetime.combine(day, start_clock))
-    end_day = day + timedelta(days=1) if start_clock > end_clock else day
-    end = market_tz.localize(datetime.combine(end_day, end_clock))
-    return start, end
-
-
-def select_session_rows(config, frame, now):
-    """Keep only bars inside the configured market sessions."""
-    market_tz = pytz.timezone(config["market_timezone"])
-    if now.tzinfo is None:
-        now = market_tz.localize(now)
-    now_market = now.astimezone(market_tz)
-
-    if frame.index.tz is None:
-        frame.index = frame.index.tz_localize(market_tz)
-    else:
-        frame.index = frame.index.tz_convert(market_tz)
-
-    selected = None
-    for start_text, end_text in config["data_windows"]:
-        start, end = session_bounds(market_tz, now_market, start_text, end_text)
-        mask = (frame.index >= start) & (frame.index <= end)
-        selected = mask if selected is None else selected | mask
-    return frame[selected].copy() if selected is not None else frame.iloc[0:0]
-
-
-def fetch_prices(config, now=None):
-    """获取当前交易时段的价格、时间戳、前收和最新报价。"""
+def fetch_prices(ticker):
+    """获取当日价格、前收和最新报价；失败时返回三个 None。"""
     try:
-        obj = yf.Ticker(config["ticker"])
-        history = obj.history(
-            period="5d",
-            interval="2m",
-            prepost=config.get("prepost", False),
-        )
-        if history.empty:
-            logger.warning("数据获取失败 (%s): 未返回行情数据", config["ticker"])
-            return None, None, None, None
-
-        frame = select_session_rows(config, history, now or datetime.now(pytz.UTC))
-        closes = frame["Close"].dropna()
-        if closes.empty:
-            logger.warning("数据获取失败 (%s): 当前时段没有行情数据", config["ticker"])
-            return None, None, None, None
-        prices = closes.to_numpy(dtype=float)
-        timestamps = list(closes.index.to_pydatetime())
-
+        obj = yf.Ticker(ticker)
+        df = obj.history(period="1d", interval="2m")
+        if df.empty:
+            logger.warning("数据获取失败 (%s): 未返回行情数据", ticker)
+            return None, None, None
         # 最新价用轻量的 fast_info，避免加载 obj.get_info() 的大量公司元数据。
         try:
             latest_price = obj.fast_info.last_price
@@ -218,54 +137,37 @@ def fetch_prices(config, now=None):
             except Exception:
                 prev_close = None
         if not prev_close or prev_close <= 0:
-            opens = frame["Open"].dropna()
-            prev_close = opens.iloc[0] if not opens.empty else None
-        if prev_close is None or prev_close <= 0:
-            logger.warning("数据获取失败 (%s): 行情数据不完整", config["ticker"])
-            return None, None, None, None
-        return prices, timestamps, float(prev_close), latest_price
+            prev_close = df["Open"].iloc[0]
+        prices = df["Close"].dropna().values
+        if len(prices) == 0 or prev_close is None or prev_close <= 0:
+            logger.warning("数据获取失败 (%s): 行情数据不完整", ticker)
+            return None, None, None
+        return prices, float(prev_close), latest_price
     except Exception as e:
-        logger.warning("数据获取失败 (%s): %s", config["ticker"], e)
-        return None, None, None, None
+        logger.warning("数据获取失败 (%s): %s", ticker, e)
+        return None, None, None
 
 
-def build_axis_ticks(config, timestamps):
-    """Map market-local clock times to data indices and display-time labels."""
-    if not timestamps:
-        return [], []
-
+def build_axis_labels(config, now=None):
+    """Keep the original tick positions but format their times for today."""
+    if now is None:
+        now = datetime.now(pytz.UTC)
     market_tz = pytz.timezone(config["market_timezone"])
-    first_market = timestamps[0].astimezone(market_tz)
-    last_timestamp = timestamps[-1]
-    timestamp_seconds = [timestamp.timestamp() for timestamp in timestamps]
-    ticks = []
+    if now.tzinfo is None:
+        now = market_tz.localize(now)
+    market_day = now.astimezone(market_tz).date()
     labels = []
-
-    for value in config["axis_times"]:
-        target = market_tz.localize(
-            datetime.combine(first_market.date(), parse_clock(value))
+    for index, value in enumerate(config["axis_times"]):
+        market_time = market_tz.localize(
+            datetime.combine(market_day, parse_clock(value))
         )
-        # Tolerate the half/final bar ending just before the nominal close.
-        if target > last_timestamp + BAR_INTERVAL:
-            continue
-
-        target_seconds = target.timestamp()
-        position = bisect_left(timestamp_seconds, target_seconds)
-        if position > 0 and (
-            position == len(timestamp_seconds)
-            or abs(timestamp_seconds[position - 1] - target_seconds)
-            < abs(timestamp_seconds[position] - target_seconds)
-        ):
-            position -= 1
-        if position >= len(timestamp_seconds) or position in ticks:
-            continue
-        ticks.append(position)
-        labels.append(target.astimezone(DISPLAY_TZ).strftime("%H:%M"))
-
-    if not ticks:
-        ticks.append(0)
-        labels.append(timestamps[0].astimezone(DISPLAY_TZ).strftime("%H:%M"))
-    return ticks, labels
+        label = market_time.astimezone(DISPLAY_TZ).strftime("%H:%M")
+        if index == 0:
+            label = " " + label
+        elif index == len(config["axis_times"]) - 1:
+            label += " "
+        labels.append(label)
+    return labels
 
 
 def draw_gradient_fill(ax, x, prices, prev_close, y_lo, y_hi):
@@ -311,9 +213,7 @@ def draw_gradient_fill(ax, x, prices, prev_close, y_lo, y_hi):
             img.set_clip_path(patch)
 
 
-def create_chart(
-    config, prices, prev_close, latest_price, x_ticks=None, x_tick_labels=None
-):
+def create_chart(config, prices, prev_close, latest_price, x_tick_labels=None):
     current = latest_price
     change = current - prev_close
     pct = change / prev_close * 100
@@ -346,14 +246,13 @@ def create_chart(
     draw_gradient_fill(ax_chart, x, prices, prev_close, y_lo, y_hi)
     ax_chart.plot(x, prices, color="black", linewidth=2, zorder=3)
 
-    if x_ticks:
-        ax_chart.set_xticks(x_ticks)
-        ax_chart.set_xticklabels(
-            x_tick_labels or [],
-            fontsize=7,
-            fontweight="bold",
-            color="black",
-        )
+    ax_chart.set_xticks(config["xticks"])
+    ax_chart.set_xticklabels(
+        x_tick_labels or [],
+        fontsize=7,
+        fontweight="bold",
+        color="black",
+    )
     ax_chart.set_yticks([])
     ax_chart.tick_params(length=0)
     for spine in ax_chart.spines.values():
@@ -361,26 +260,6 @@ def create_chart(
 
     plt.tight_layout(pad=0.2)
     return fig, current, pct
-
-
-def push_to_device(img_bytes, filename):
-    if not API_KEY or not PUSH_URL:
-        logger.error("推送失败: 请设置 ZECTRIX_API_KEY 和 ZECTRIX_DEVICE_ID")
-        return False
-    try:
-        resp = requests.post(
-            PUSH_URL,
-            headers={"X-API-Key": API_KEY},
-            files={"images": (filename, img_bytes, "image/png")},
-            data={"dither": "true", "pageId": "1"},
-            timeout=PUSH_REQUEST_TIMEOUT_SECONDS,
-        )
-        resp.raise_for_status()
-        logger.info("推送成功: 已发送 %s 到设备 %s", filename, DEVICE_ID)
-        return True
-    except requests.exceptions.RequestException as e:
-        logger.error("推送失败: %s", e)
-        return False
 
 
 def to_epaper_bitmap(png_bytes, width=EPD_WIDTH, height=EPD_HEIGHT):
@@ -418,21 +297,23 @@ def to_epaper_bitmap(png_bytes, width=EPD_WIDTH, height=EPD_HEIGHT):
     return bytes(payload)
 
 
-def render_segment_png(config, log_prefix, now=None):
+def render_segment_png(config, now=None):
     """获取行情并渲染 PNG；任何数据问题都返回 None。"""
-    prices, timestamps, prev_close, latest_price = fetch_prices(config, now)
+    prices, prev_close, latest_price = fetch_prices(config["ticker"])
     if prices is None:
         return None
 
+    max_len = config["xticks"][-1] + 1
+    prices = prices[:max_len]
     if len(prices) == 0:
         return None
     if latest_price is None:
         latest_price = prices[-1]
     if not np.isfinite(latest_price):
-        logger.warning("%s图表生成失败: %s 最新价格无效", log_prefix, config["name"])
+        logger.warning("图表生成失败: %s 最新价格无效", config["name"])
         return None
 
-    x_ticks, x_tick_labels = build_axis_ticks(config, timestamps)
+    x_tick_labels = build_axis_labels(config, now)
 
     # Flask 可并发处理请求，pyplot 则需要串行使用。
     with _render_lock:
@@ -441,15 +322,14 @@ def render_segment_png(config, log_prefix, now=None):
             prices,
             prev_close,
             latest_price,
-            x_ticks,
             x_tick_labels,
         )
         try:
             buffer = io.BytesIO()
             fig.savefig(buffer, format="png", facecolor="white", edgecolor="none")
             logger.info(
-                "%s图表生成: %s %s (%+.2f%%)",
-                log_prefix, config["name"], f"{current:,.3f}", pct,
+                "图表已刷新: %s %s (%+.2f%%)",
+                config["name"], f"{current:,.3f}", pct,
             )
             return buffer.getvalue()
         finally:
@@ -458,7 +338,7 @@ def render_segment_png(config, log_prefix, now=None):
 
 def render_segment_bitmap(config, now=None):
     """获取一个时段并渲染为设备可直接显示的位图。"""
-    png_bytes = render_segment_png(config, "服务", now)
+    png_bytes = render_segment_png(config, now)
     return to_epaper_bitmap(png_bytes) if png_bytes else None
 
 
@@ -469,6 +349,7 @@ def current_bitmap():
         cached = _image_cache["payload"]
         created_at = _image_cache["created_at"]
         if cached and (now - created_at).total_seconds() < IMAGE_CACHE_TTL_SECONDS:
+            logger.debug("缓存命中: %s", _image_cache["segment"])
             return cached
 
         active = [segment for segment in TIME_SEGMENTS if is_trading_now(segment, now)]
@@ -483,6 +364,8 @@ def current_bitmap():
 
         # A temporary market-data failure or an inactive market must not cause
         # a replacement error page on the e-paper display.
+        if cached:
+            logger.debug("刷新失败或无活动市场，继续返回缓存")
         return cached
 
 
@@ -514,7 +397,7 @@ def epaper_image():
         )
 
     device_id = request.args.get("id", "未提供设备 ID")
-    logger.info("服务请求成功: 向 %s 返回 %s 字节图像", device_id, len(payload))
+    logger.debug("图片请求: %s (%s 字节)", device_id, len(payload))
     return Response(payload, mimetype="application/octet-stream")
 
 
@@ -528,129 +411,19 @@ def healthz():
     )
 
 
-# ==================== 主流程 ====================
-def process_segment(config, now=None):
-    png_bytes = render_segment_png(config, "推送", now)
-    if png_bytes is None:
-        logger.info("推送跳过: %s 无可用图表", config["name"])
-        return
-
-    try:
-        with open(config["output_file"], "wb") as output:
-            output.write(png_bytes)
-    except OSError as error:
-        # 本地文件仅用于留档，写入失败不应阻止向设备推送。
-        logger.warning("图片留档失败 (%s): %s", config["output_file"], error)
-
-    push_to_device(png_bytes, config["output_file"])
-
-
-def run_push_cycle():
-    """Generate and push the chart for the currently active market segment."""
-    now = datetime.now(pytz.UTC)
-    now_local = datetime.now()
-    now_et = now.astimezone(ET)
-
-    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-    local_weekday = weekdays[now_local.weekday()]
-    et_weekday = weekdays[now_et.weekday()]
-
-    logger.info("市场数据推送")
-    logger.info(
-        "服务器时间: %s %s %s",
-        now_local.strftime("%Y-%m-%d"), local_weekday, now_local.strftime("%H:%M:%S"),
-    )
-    logger.info(
-        "美东时间:   %s %s %s",
-        now_et.strftime("%Y-%m-%d"), et_weekday, now_et.strftime("%H:%M:%S %Z"),
-    )
-
-    active = [config for config in TIME_SEGMENTS if is_trading_now(config, now)]
-    if active:
-        for config in active:
-            process_segment(config, now)
-    else:
-        logger.info("休市中，跳过更新")
-
-
-def positive_interval(value):
-    try:
-        interval = float(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("周期必须是正数（单位：分钟）") from error
-    if interval <= 0:
-        raise argparse.ArgumentTypeError("周期必须大于 0（单位：分钟）")
-    return interval
-
-
-def run_push_loop(interval_minutes, once=False):
-    """按配置周期执行推送。"""
-    try:
-        while True:
-            run_push_cycle()
-            if once:
-                return
-            time.sleep(interval_minutes * 60)
-    except KeyboardInterrupt:
-        logger.info("已停止推送模式")
-
-
-def run_both(host, port, interval_minutes):
-    """同时在后台提供服务接口，并在主线程定期推送。"""
-    from werkzeug.serving import make_server
-
-    server = make_server(host, port, app, threaded=True)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-    logger.info("服务模式已启动（后台线程）")
-    logger.info("图片接口地址: http://%s:%s/epaper-display/image", host, port)
-    try:
-        run_push_loop(interval_minutes)
-    finally:
-        server.shutdown()
-        server_thread.join()
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Generate, push, or serve e-paper charts")
-    parser.add_argument(
-        "--mode",
-        choices=("service", "push", "both"),
-        default="push",
-        help="运行模式：service 提供接口；push 定期推送；both 同时运行（默认：push）",
-    )
+    parser = argparse.ArgumentParser(description="Serve e-paper chart images")
     parser.add_argument("--host", default="0.0.0.0", help="server bind address")
     parser.add_argument("--port", type=int, default=35000, help="server port")
-    parser.add_argument(
-        "--interval",
-        type=positive_interval,
-        default=DEFAULT_PUSH_INTERVAL_MINUTES,
-        metavar="MINUTES",
-        help=f"推送间隔（分钟，默认：{DEFAULT_PUSH_INTERVAL_MINUTES}）",
-    )
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="推送模式仅执行一次，适合由 cron 等外部调度器调用",
-    )
     args = parser.parse_args()
 
-    if args.once and args.mode != "push":
-        parser.error("--once 仅适用于推送模式")
-
-    if args.mode == "service":
-        logger.info("服务模式已启动")
-        logger.info("图片接口地址: http://%s:%s/epaper-display/image", args.host, args.port)
-        logger.info("服务正在运行，等待设备请求图片...")
-        app.run(host=args.host, port=args.port, threaded=True)
-        return
-
-    if args.mode == "both":
-        run_both(args.host, args.port, args.interval)
-        return
-
-    logger.info("推送模式已启动，周期：每 %g 分钟", args.interval)
-    run_push_loop(args.interval, args.once)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    logger.info(
+        "图片服务启动: http://%s:%s/epaper-display/image",
+        args.host,
+        args.port,
+    )
+    app.run(host=args.host, port=args.port, threaded=True)
 
 
 if __name__ == "__main__":

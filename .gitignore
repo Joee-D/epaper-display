@@ -6,6 +6,3 @@
 
 # Python bytecode from running main.py locally
 __pycache__/
-
-# Charts archived by push mode (see README)
-*_trend.png

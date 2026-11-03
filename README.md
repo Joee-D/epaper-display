@@ -43,7 +43,7 @@ HTTP 200 和恰好 15,000 字节：1 位、MSB 在前、按行排列、行间无
 仓库根目录的 `main.py` 可以生成当前交易时段的图表，并通过该接口提供给设备：
 
 ```sh
-python main.py --mode service --host 0.0.0.0 --port 35000
+python main.py --host 0.0.0.0 --port 35000
 ```
 
 服务运行在与设备同一网络的机器上，然后把配网页面中的服务器地址填写为这台机器的
@@ -53,27 +53,11 @@ python main.py --mode service --host 0.0.0.0 --port 35000
 `Asia/Shanghai` 时间。需要显示其他时区时，启动服务前设置 `DISPLAY_TIMEZONE`，例如：
 
 ```sh
-DISPLAY_TIMEZONE=Asia/Tokyo python main.py --mode service --port 35000
+DISPLAY_TIMEZONE=Asia/Tokyo python main.py --port 35000
 ```
 
-## 其他运行方式
+设备请求本身不会逐条写入日志。需要排查请求或缓存问题时，可以临时启用调试日志：
 
-`main.py` 还支持两种运行方式：
-
-- **推送模式**：生成当前时段的图表并反复推送到 Zectrix 设备。凭据通过环境变量提供，
-  推送周期用 `--interval`（单位：分钟）设置：
-
-  ```sh
-  export ZECTRIX_API_KEY='your-api-key'
-  export ZECTRIX_DEVICE_ID='AA:BB:CC:DD:EE:FF'
-  python main.py --mode push --interval 15
-  ```
-
-  默认周期 15 分钟，也可以通过 `PUSH_INTERVAL_MINUTES` 设置。如果要用 cron 之类的外部
-  调度器执行单次推送，加上 `--once`。
-
-- **同时运行**：在后台提供图片接口，并按周期推送到 Zectrix 设备：
-
-  ```sh
-  python main.py --mode both --host 0.0.0.0 --port 35000 --interval 15
-  ```
+```sh
+LOG_LEVEL=DEBUG python main.py --port 35000
+```
