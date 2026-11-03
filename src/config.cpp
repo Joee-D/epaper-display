@@ -13,9 +13,25 @@ static uint32_t normalizedInterval(uint32_t intervalMin) {
   return intervalMin;
 }
 
+String buildServerUrl(const DeviceConfig &cfg) {
+  String host = cfg.serverIp;
+  host.trim();
+  // Tolerate a pasted URL: keep only the host portion.
+  const int scheme = host.indexOf("://");
+  if (scheme >= 0) host = host.substring(scheme + 3);
+  const int slash = host.indexOf('/');
+  if (slash >= 0) host = host.substring(0, slash);
+  const int colon = host.indexOf(':');
+  if (colon >= 0) host = host.substring(0, colon);
+  if (host.length() == 0) return "";
+  return "http://" + host + ":" + String(SERVER_PORT) + SERVER_PATH;
+}
+
 void configLoad(DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NS, /*readOnly=*/true);
+  cfg.serverIp    = prefs.getString("server_ip", "");
+  cfg.serverIp.trim();
   cfg.intervalMin = prefs.getUInt("interval_min", DEFAULT_INTERVAL_MIN);
   cfg.rotate180   = prefs.getBool("rotate180", false);
   cfg.keepWifi    = prefs.getBool("keepwifi", true);
@@ -28,6 +44,9 @@ void configLoad(DeviceConfig &cfg) {
 void configSave(const DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NS, /*readOnly=*/false);
+  String serverIp = cfg.serverIp;
+  serverIp.trim();
+  prefs.putString("server_ip", serverIp);
   prefs.putUInt("interval_min", normalizedInterval(cfg.intervalMin));
   prefs.putBool("rotate180", cfg.rotate180);
   prefs.putBool("keepwifi", cfg.keepWifi);

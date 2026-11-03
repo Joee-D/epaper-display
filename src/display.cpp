@@ -1,5 +1,7 @@
 #include "display.h"
 #include <SPI.h>
+#include <HTTPClient.h>
+#include <WiFiClient.h>
 
 #include <GxEPD2_BW.h>
 #include <gdey/GxEPD2_420_GDEY042T81.h>
@@ -12,10 +14,9 @@ constexpr uint8_t FULL_REFRESH_INTERVAL = 5;
 RTC_DATA_ATTR static uint8_t partialRefreshCount = FULL_REFRESH_INTERVAL;
 
 // Content change detection: remember a hash of the last bitmap actually drawn
-// so an identical frame (e.g. flat market, market closed) skips the expensive
-// e-paper redraw. lastDrawWasBitmap distinguishes "panel shows the bitmap"
-// from "panel shows a status message", so a message never gets overwritten
-// by a stale-hash skip.
+// so an identical server image skips the expensive e-paper redraw.
+// lastDrawWasBitmap distinguishes "panel shows the bitmap" from "panel shows a
+// status message", so a message never gets overwritten by a stale-hash skip.
 RTC_DATA_ATTR static uint32_t lastImageHash = 0;
 RTC_DATA_ATTR static bool lastDrawWasBitmap = false;
 
@@ -67,6 +68,92 @@ void displayShowMessage(const String &line1, const String &line2) {
     epd.setCursor((epd.width() - w) / 2, epd.height() / 2 + 10);
     epd.print(line2);
   } while (epd.nextPage());
+}
+
+bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
+  String url = buildServerUrl(cfg);
+  if (url.length() == 0) {
+    Serial.println("Image fetch skipped: no server configured");
+    return false;
+  }
+
+  // MAC addresses contain ':', so encode the identifier as a query value.
+  String encodedId;
+  for (size_t i = 0; i < deviceId.length(); ++i) {
+    const char c = deviceId[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+        c == '~') {
+      encodedId += c;
+    } else {
+      char escaped[4];
+      snprintf(escaped, sizeof(escaped), "%%%02X",
+               static_cast<unsigned char>(c));
+      encodedId += escaped;
+    }
+  }
+
+  url += (url.indexOf('?') >= 0) ? '&' : '?';
+  url += "w=" + String(EPD_WIDTH) + "&h=" + String(EPD_HEIGHT) +
+         "&id=" + encodedId;
+
+  HTTPClient http;
+  http.setTimeout(15000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(url)) {
+    Serial.println("Image fetch failed: invalid server URL");
+    return false;
+  }
+
+  const int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("Image fetch failed: HTTP %d\n", code);
+    http.end();
+    return false;
+  }
+
+  const int len = http.getSize();
+  // Chunked responses report -1; the read loop below still enforces the exact
+  // framebuffer size.
+  if (len >= 0 && len != EPD_IMAGE_BYTES) {
+    Serial.printf("Image fetch failed: expected %d bytes, got %d\n",
+                  EPD_IMAGE_BYTES, len);
+    http.end();
+    return false;
+  }
+
+  uint8_t *buf = static_cast<uint8_t *>(malloc(EPD_IMAGE_BYTES));
+  if (!buf) {
+    Serial.println("Image fetch failed: out of memory");
+    http.end();
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  size_t received = 0;
+  const unsigned long start = millis();
+  while (received < static_cast<size_t>(EPD_IMAGE_BYTES) &&
+         millis() - start < 20000) {
+    if (stream->available()) {
+      const int n =
+          stream->read(buf + received, EPD_IMAGE_BYTES - received);
+      if (n > 0) received += static_cast<size_t>(n);
+    } else {
+      delay(5);
+    }
+  }
+  http.end();
+
+  if (received != static_cast<size_t>(EPD_IMAGE_BYTES)) {
+    free(buf);
+    Serial.printf("Image fetch failed: incomplete download (%u/%d bytes)\n",
+                  static_cast<unsigned>(received), EPD_IMAGE_BYTES);
+    return false;
+  }
+
+  const bool shown = displayShowBitmap(buf);
+  free(buf);
+  return shown;
 }
 
 bool displayShowBitmap(const uint8_t *bitmap) {

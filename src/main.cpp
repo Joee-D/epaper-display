@@ -1,15 +1,14 @@
 // epaper-display
 // ---------------------------------------------------------------------------
-// A self-contained ESP32 + e-ink firmware inspired by
+// A minimal ESP32 + e-ink firmware inspired by
 // https://github.com/datascale-ai/inksight :
 //   1. First boot (or held config button) -> WiFi captive-portal provisioning
-//      page (SSID/password + refresh interval).
-//   2. Every wake-up: connect WiFi, pick the market session that is open right
-//      now, fetch its quotes, draw the chart on the device, push it to the
-//      panel, then deep-sleep until the next cycle.
+//      page (SSID/password + image server + refresh interval).
+//   2. Every wake-up: connect WiFi, GET a pre-rendered 1bpp bitmap from the
+//      image server, draw it full-screen, then sleep until the next cycle.
 //
-// No backend is involved: quotes come from Yahoo Finance and the chart is
-// rendered locally (see src/market.* and src/chart.*).
+// The device does not render charts. main.py can generate and serve the
+// bitmap expected by displayFetchAndShow().
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
@@ -17,19 +16,23 @@
 #include <WiFiManager.h>
 #include <esp_sleep.h>
 
-#include "chart.h"
 #include "config.h"
 #include "display.h"
-#include "market.h"
 
 DeviceConfig cfg;
 WiFiManager wm;
 
 // Custom fields shown on the WiFiManager config portal, alongside the
-// built-in SSID/password fields.
+// built-in SSID/password fields. Only the server host is entered here; the
+// firmware fills in the scheme, port, and image path.
+WiFiManagerParameter paramServerIp("server", "Image server IP or hostname", "", 64);
 WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
 WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
 WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi on between refreshes for USB power (1=USB, 0=battery)", "1", 1);
+
+String deviceId() {
+  return WiFi.macAddress();
+}
 
 bool configButtonHeld() {
   pinMode(PIN_CONFIG_BUTTON, INPUT_PULLUP);
@@ -45,6 +48,7 @@ bool configButtonHeld() {
 }
 
 void saveConfigCallback() {
+  cfg.serverIp    = paramServerIp.getValue();
   cfg.intervalMin = String(paramInterval.getValue()).toInt();
   if (cfg.intervalMin < MIN_REFRESH_INTERVAL_MIN ||
       cfg.intervalMin > MAX_REFRESH_INTERVAL_MIN) {
@@ -59,9 +63,11 @@ void runProvisioningPortal(bool forced) {
   displayShowMessage("Setup mode",
                       "Join WiFi \"epaper-display-Setup\" then open 192.168.4.1");
 
+  paramServerIp.setValue(cfg.serverIp.c_str(), 64);
   paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
   paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
   paramKeepWifi.setValue(cfg.keepWifi ? "1" : "0", 1);
+  wm.addParameter(&paramServerIp);
   wm.addParameter(&paramInterval);
   wm.addParameter(&paramRotate180);
   wm.addParameter(&paramKeepWifi);
@@ -102,41 +108,6 @@ void goToSleep(const DeviceConfig &cfg) {
   esp_deep_sleep_start();
 }
 
-// Fetches the active market's quotes from Yahoo Finance, draws the chart on the
-// device and pushes it to the panel. Transient failures leave the last chart on
-// the panel instead of replacing it with an error page.
-void displayLocalChart() {
-  if (!marketSyncTime()) {
-    Serial.println("Local chart skipped: clock not set");
-    displayShowMessage("Clock not set", "NTP unreachable; retrying next cycle");
-    return;
-  }
-
-  struct tm nowEt;
-  if (!marketNow(nowEt)) {
-    Serial.println("Local chart skipped: clock not set");
-    return;
-  }
-
-  const MarketSegment *segment = marketActiveSegment(nowEt);
-  if (segment == nullptr) {
-    Serial.println("Local chart skipped: every market is closed");
-    return;
-  }
-  Serial.printf("Local chart: %s (%s) at %02d:%02d ET\n", segment->name,
-                segment->symbol, nowEt.tm_hour, nowEt.tm_min);
-
-  MarketSeries series;
-  if (!marketFetchSeries(*segment, series)) return;
-
-  const float pct =
-      (series.price - series.prevClose) / series.prevClose * 100.0f;
-  Serial.printf("Local chart: %s %+.2f%% (%d points)\n", segment->displayName,
-                pct, series.count);
-
-  chartDisplay(*segment, series);
-}
-
 void runCycle() {
   displayInit(cfg);
 
@@ -145,7 +116,7 @@ void runCycle() {
   // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
   // WiFi down and reconnect here. In keepWifi mode we stay awake between
   // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
-  if (forcePortal || !cfg.provisioned) {
+  if (forcePortal || !cfg.provisioned || cfg.serverIp.length() == 0) {
     runProvisioningPortal(true);
   } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
@@ -155,7 +126,12 @@ void runCycle() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    displayLocalChart();
+    if (cfg.serverIp.length() == 0) {
+      displayShowMessage("No server configured",
+                          "Hold BOOT button 3s to open setup");
+    } else {
+      displayFetchAndShow(cfg, deviceId());
+    }
   }
 
   goToSleep(cfg);

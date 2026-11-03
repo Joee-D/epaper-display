@@ -4,7 +4,7 @@
 # PlatformIO IDE regenerates these and they embed absolute local paths
 .vscode/
 
-# Python bytecode from running src/main.py locally
+# Python bytecode from running main.py locally
 __pycache__/
 
 # Charts archived by push mode (see README)
