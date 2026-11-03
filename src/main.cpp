@@ -59,7 +59,7 @@ void saveConfigCallback() {
   configSave(cfg);
 }
 
-void runProvisioningPortal(bool forced) {
+void runProvisioningPortal() {
   displayShowMessage("Setup mode",
                       "Join WiFi \"epaper-display-Setup\" then open 192.168.4.1");
 
@@ -74,14 +74,7 @@ void runProvisioningPortal(bool forced) {
   wm.setSaveParamsCallback(saveConfigCallback);
   wm.setConfigPortalTimeout(300); // give up and retry later if nobody shows up
 
-  bool ok;
-  if (forced) {
-    ok = wm.startConfigPortal("epaper-display-Setup");
-  } else {
-    ok = wm.autoConnect("epaper-display-Setup");
-  }
-
-  if (!ok) {
+  if (!wm.startConfigPortal("epaper-display-Setup")) {
     displayShowMessage("Setup timed out", "Will retry after deep sleep");
   }
 }
@@ -117,7 +110,7 @@ void runCycle() {
   // WiFi down and reconnect here. In keepWifi mode we stay awake between
   // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
   if (forcePortal || !cfg.provisioned || cfg.serverIp.length() == 0) {
-    runProvisioningPortal(true);
+    runProvisioningPortal();
   } else if (WiFi.status() != WL_CONNECTED) {
     if (!wm.autoConnect("epaper-display-Setup")) {
       goToSleep(cfg);

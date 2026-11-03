@@ -78,20 +78,8 @@ bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
   }
 
   // MAC addresses contain ':', so encode the identifier as a query value.
-  String encodedId;
-  for (size_t i = 0; i < deviceId.length(); ++i) {
-    const char c = deviceId[i];
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
-        c == '~') {
-      encodedId += c;
-    } else {
-      char escaped[4];
-      snprintf(escaped, sizeof(escaped), "%%%02X",
-               static_cast<unsigned char>(c));
-      encodedId += escaped;
-    }
-  }
+  String encodedId = deviceId;
+  encodedId.replace(":", "%3A");
 
   url += (url.indexOf('?') >= 0) ? '&' : '?';
   url += "w=" + String(EPD_WIDTH) + "&h=" + String(EPD_HEIGHT) +

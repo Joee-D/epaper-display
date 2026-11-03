@@ -1,9 +1,10 @@
 import io
 import argparse
 import logging
+import math
 import os
 import threading
-from datetime import datetime, time as datetime_time
+from datetime import datetime, time
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -41,54 +42,36 @@ DISPLAY_TZ = pytz.timezone(os.getenv("DISPLAY_TIMEZONE", "Asia/Shanghai"))
 
 TIME_SEGMENTS = [
     {
-        "name": "Premarket",
-        "ticker": "NQ=F",
-        "display_name": "NASDAQ FUTURES",
-        "market_timezone": "America/New_York",
-        "active_windows": [("00:00", "09:30")],
-        "xticks": [0, 150, 285],
-        "axis_times": ["00:00", "05:00", "09:30"],
-        "display_priority": 1,
+        "name": "Evening",
+        "ticker": "930955.SS",
+        "display_name": "CSI Dividend Low Volatility 100",
+        "market_timezone": "Asia/Shanghai",
+        "active_windows": [(time(9, 30), time(11, 30)), (time(13, 0), time(15, 0))],
+        "xticks": [0, 60, 119],
+        "axis_times": [time(9, 30), time(13, 0), time(15, 0)],
     },
     {
         "name": "Regular",
         "ticker": "^ndx",
         "display_name": "NASDAQ 100",
         "market_timezone": "America/New_York",
-        # Keep the last regular-session chart visible briefly after the close.
-        "active_windows": [("09:30", "17:40")],
+        "active_windows": [(time(9, 30), time(17, 40))],
         "xticks": [0, 105, 195],
-        "axis_times": ["09:30", "13:00", "16:00"],
-        "display_priority": 2,
+        "axis_times": [time(9, 30), time(13, 0), time(16, 0)],
     },
     {
-        "name": "Evening",
-        "ticker": "930955.SS",
-        "display_name": "CSI Dividend Low Volatility 100",
-        "market_timezone": "Asia/Shanghai",
-        "active_windows": [("09:30", "11:30"), ("13:00", "15:00")],
-        "xticks": [0, 60, 119],
-        "axis_times": ["09:30", "13:00", "15:00"],
-        # A-share afternoon overlaps the U.S. premarket in Beijing time. Prefer
-        # the local market so both markets still get a visible update each day.
-        "display_priority": 3,
+        "name": "Premarket",
+        "ticker": "NQ=F",
+        "display_name": "NASDAQ FUTURES",
+        "market_timezone": "America/New_York",
+        "active_windows": [(time(0, 0), time(9, 30))],
+        "xticks": [0, 150, 285],
+        "axis_times": [time(0, 0), time(5, 0), time(9, 30)],
     },
 ]
 
 
 # ==================== 工具函数 ====================
-def parse_clock(value):
-    hour, minute = (int(part) for part in value.split(":", 1))
-    return datetime_time(hour=hour, minute=minute)
-
-
-def is_time_in_window(now_time, start_time, end_time):
-    if start_time <= end_time:
-        return start_time <= now_time < end_time
-    # Cross-midnight window, e.g. 21:30 -> 00:00.
-    return now_time >= start_time or now_time < end_time
-
-
 def is_trading_now(config, now=None):
     """Check the config's trading windows in the market's own timezone."""
     if now is None:
@@ -97,12 +80,19 @@ def is_trading_now(config, now=None):
     if now.tzinfo is None:
         now = market_tz.localize(now)
     now_market = now.astimezone(market_tz)
-    #if now.weekday() >= 5:  # 周六(5)、周日(6) 跳过
-    #    return False
+    now_time = now_market.time()
     return any(
-        is_time_in_window(now_market.time(), parse_clock(start), parse_clock(end))
+        start <= now_time < end
         for start, end in config["active_windows"]
     )
+
+
+def positive_price(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def fetch_prices(ticker):
@@ -125,24 +115,25 @@ def fetch_prices(ticker):
         try:
             quote_info = obj.get_info()
             prev_close = (
-                quote_info.get("regularMarketPreviousClose")
-                or quote_info.get("previousClose")
+                positive_price(quote_info.get("regularMarketPreviousClose"))
+                or positive_price(quote_info.get("previousClose"))
             )
         except Exception:
             prev_close = None
-        if not prev_close or prev_close <= 0:
-            # 报价接口不可用时的退路；对期货仍可能有约 1% 的偏差。
+        if prev_close is None:
             try:
-                prev_close = obj.fast_info.regular_market_previous_close
+                prev_close = positive_price(
+                    obj.fast_info.regular_market_previous_close
+                )
             except Exception:
                 prev_close = None
-        if not prev_close or prev_close <= 0:
-            prev_close = df["Open"].iloc[0]
+        if prev_close is None:
+            prev_close = positive_price(df["Open"].iloc[0])
         prices = df["Close"].dropna().values
-        if len(prices) == 0 or prev_close is None or prev_close <= 0:
+        if len(prices) == 0 or prev_close is None:
             logger.warning("数据获取失败 (%s): 行情数据不完整", ticker)
             return None, None, None
-        return prices, float(prev_close), latest_price
+        return prices, prev_close, latest_price
     except Exception as e:
         logger.warning("数据获取失败 (%s): %s", ticker, e)
         return None, None, None
@@ -157,10 +148,8 @@ def build_axis_labels(config, now=None):
         now = market_tz.localize(now)
     market_day = now.astimezone(market_tz).date()
     labels = []
-    for index, value in enumerate(config["axis_times"]):
-        market_time = market_tz.localize(
-            datetime.combine(market_day, parse_clock(value))
-        )
+    for index, market_time in enumerate(config["axis_times"]):
+        market_time = market_tz.localize(datetime.combine(market_day, market_time))
         label = market_time.astimezone(DISPLAY_TZ).strftime("%H:%M")
         if index == 0:
             label = " " + label
@@ -297,8 +286,8 @@ def to_epaper_bitmap(png_bytes, width=EPD_WIDTH, height=EPD_HEIGHT):
     return bytes(payload)
 
 
-def render_segment_png(config, now=None):
-    """获取行情并渲染 PNG；任何数据问题都返回 None。"""
+def render_segment_bitmap(config, now=None):
+    """Fetch one market segment and return its device-ready bitmap."""
     prices, prev_close, latest_price = fetch_prices(config["ticker"])
     if prices is None:
         return None
@@ -327,19 +316,15 @@ def render_segment_png(config, now=None):
         try:
             buffer = io.BytesIO()
             fig.savefig(buffer, format="png", facecolor="white", edgecolor="none")
-            logger.info(
-                "图表已刷新: %s %s (%+.2f%%)",
-                config["name"], f"{current:,.3f}", pct,
-            )
-            return buffer.getvalue()
+            png_bytes = buffer.getvalue()
         finally:
             plt.close(fig)
 
-
-def render_segment_bitmap(config, now=None):
-    """获取一个时段并渲染为设备可直接显示的位图。"""
-    png_bytes = render_segment_png(config, now)
-    return to_epaper_bitmap(png_bytes) if png_bytes else None
+    logger.info(
+        "图表已刷新: %s %s (%+.2f%%)",
+        config["name"], f"{current:,.3f}", pct,
+    )
+    return to_epaper_bitmap(png_bytes)
 
 
 def current_bitmap():
@@ -352,13 +337,15 @@ def current_bitmap():
             logger.debug("缓存命中: %s", _image_cache["segment"])
             return cached
 
-        active = [segment for segment in TIME_SEGMENTS if is_trading_now(segment, now)]
-        if active:
-            active.sort(key=lambda segment: segment["display_priority"], reverse=True)
-            payload = render_segment_bitmap(active[0], now)
+        segment = next(
+            (item for item in TIME_SEGMENTS if is_trading_now(item, now)),
+            None,
+        )
+        if segment:
+            payload = render_segment_bitmap(segment, now)
             if payload:
                 _image_cache.update(
-                    payload=payload, created_at=now, segment=active[0]["name"]
+                    payload=payload, created_at=now, segment=segment["name"]
                 )
                 return payload
 
