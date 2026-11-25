@@ -1,7 +1,5 @@
 #include "display.h"
 #include <SPI.h>
-#include <HTTPClient.h>
-#include <WiFiClient.h>
 
 #include <GxEPD2_BW.h>
 #include <gdey/GxEPD2_420_GDEY042T81.h>
@@ -9,12 +7,14 @@
 static GxEPD2_BW<GxEPD2_420_GDEY042T81, GxEPD2_420_GDEY042T81::HEIGHT> epd(
     GxEPD2_420_GDEY042T81(PIN_EPD_CS, PIN_EPD_DC, PIN_EPD_RST, PIN_EPD_BUSY));
 
-// After this many partial updates, do a full refresh to remove ghosting.
-constexpr uint8_t FULL_REFRESH_INTERVAL = 5;
-RTC_DATA_ATTR static uint8_t partialRefreshCount = FULL_REFRESH_INTERVAL;
+// Time-based full refreshes remove accumulated ghosting without depending on
+// the configured market refresh interval.
+constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 60UL * 60UL * 1000UL;
+static bool hasFullRefreshed = false;
+static uint32_t lastFullRefreshMs = 0;
 
 // Content change detection: remember a hash of the last bitmap actually drawn
-// so an identical server image skips the expensive e-paper redraw.
+// so an identical chart skips the expensive e-paper redraw.
 // lastDrawWasBitmap distinguishes "panel shows the bitmap" from "panel shows a
 // status message", so a message never gets overwritten by a stale-hash skip.
 RTC_DATA_ATTR static uint32_t lastImageHash = 0;
@@ -30,22 +30,28 @@ static uint32_t fnv1a(const uint8_t *data, size_t len) {
 }
 
 static bool needsFullRefresh() {
-  return partialRefreshCount >= FULL_REFRESH_INTERVAL;
+  if (!hasFullRefreshed) return true;
+  return (uint32_t)(millis() - lastFullRefreshMs) >= FULL_REFRESH_INTERVAL_MS;
 }
 
-void displayInit(const DeviceConfig &cfg) {
+static void markFullRefresh() {
+  hasFullRefreshed = true;
+  lastFullRefreshMs = millis();
+}
+
+void displayInit() {
   SPI.begin(PIN_EPD_SCK, /*MISO=*/-1, PIN_EPD_MOSI, PIN_EPD_CS);
   
   bool isFullRefresh = needsFullRefresh();
   
   epd.init(115200, isFullRefresh, /*resetDuration=*/20, /*pulldown_rst_mode=*/false);
-  epd.setRotation(cfg.rotate180 ? 2 : 0);
 }
 
 void displayShowMessage(const String &line1, const String &line2) {
   lastDrawWasBitmap = false;
+  const bool fullRefresh = needsFullRefresh();
 
-  if (needsFullRefresh()) {
+  if (fullRefresh) {
     epd.setFullWindow();
   } else {
     epd.setPartialWindow(0, 0, epd.width(), epd.height());
@@ -68,94 +74,24 @@ void displayShowMessage(const String &line1, const String &line2) {
     epd.setCursor((epd.width() - w) / 2, epd.height() / 2 + 10);
     epd.print(line2);
   } while (epd.nextPage());
-}
 
-bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId) {
-  String url = buildServerUrl(cfg);
-  if (url.length() == 0) {
-    Serial.println("Image fetch skipped: no server configured");
-    return false;
-  }
-
-  // MAC addresses contain ':', so encode the identifier as a query value.
-  String encodedId = deviceId;
-  encodedId.replace(":", "%3A");
-
-  url += (url.indexOf('?') >= 0) ? '&' : '?';
-  url += "w=" + String(EPD_WIDTH) + "&h=" + String(EPD_HEIGHT) +
-         "&id=" + encodedId;
-
-  HTTPClient http;
-  http.setTimeout(15000);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  if (!http.begin(url)) {
-    Serial.println("Image fetch failed: invalid server URL");
-    return false;
-  }
-
-  const int code = http.GET();
-  if (code != HTTP_CODE_OK) {
-    Serial.printf("Image fetch failed: HTTP %d\n", code);
-    http.end();
-    return false;
-  }
-
-  const int len = http.getSize();
-  // Chunked responses report -1; the read loop below still enforces the exact
-  // framebuffer size.
-  if (len >= 0 && len != EPD_IMAGE_BYTES) {
-    Serial.printf("Image fetch failed: expected %d bytes, got %d\n",
-                  EPD_IMAGE_BYTES, len);
-    http.end();
-    return false;
-  }
-
-  uint8_t *buf = static_cast<uint8_t *>(malloc(EPD_IMAGE_BYTES));
-  if (!buf) {
-    Serial.println("Image fetch failed: out of memory");
-    http.end();
-    return false;
-  }
-
-  WiFiClient *stream = http.getStreamPtr();
-  size_t received = 0;
-  const unsigned long start = millis();
-  while (received < static_cast<size_t>(EPD_IMAGE_BYTES) &&
-         millis() - start < 20000) {
-    if (stream->available()) {
-      const int n =
-          stream->read(buf + received, EPD_IMAGE_BYTES - received);
-      if (n > 0) received += static_cast<size_t>(n);
-    } else {
-      delay(5);
-    }
-  }
-  http.end();
-
-  if (received != static_cast<size_t>(EPD_IMAGE_BYTES)) {
-    free(buf);
-    Serial.printf("Image fetch failed: incomplete download (%u/%d bytes)\n",
-                  static_cast<unsigned>(received), EPD_IMAGE_BYTES);
-    return false;
-  }
-
-  const bool shown = displayShowBitmap(buf);
-  free(buf);
-  return shown;
+  if (fullRefresh) markFullRefresh();
 }
 
 bool displayShowBitmap(const uint8_t *bitmap) {
   if (bitmap == nullptr) return false;
+  const bool fullRefresh = needsFullRefresh();
 
   // Identical frame to the last one actually shown: nothing to redraw. This
   // skips the ~2s panel refresh and avoids e-ink wear on every tick.
   uint32_t hash = fnv1a(bitmap, EPD_IMAGE_BYTES);
-  if (lastDrawWasBitmap && lastImageHash != 0 && hash == lastImageHash) {
+  if (!fullRefresh && lastDrawWasBitmap && lastImageHash != 0 &&
+      hash == lastImageHash) {
     Serial.println("Image unchanged; skipping redraw");
     return true;
   }
 
-  if (needsFullRefresh()) {
+  if (fullRefresh) {
     epd.setFullWindow();
   } else {
     epd.setPartialWindow(0, 0, EPD_WIDTH, EPD_HEIGHT);
@@ -170,11 +106,7 @@ bool displayShowBitmap(const uint8_t *bitmap) {
   lastImageHash = hash;
   lastDrawWasBitmap = true;
 
-  if (needsFullRefresh()) {
-    partialRefreshCount = 0;
-  } else {
-    ++partialRefreshCount;
-  }
+  if (fullRefresh) markFullRefresh();
 
   return true;
 }

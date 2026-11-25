@@ -6,3 +6,6 @@
 
 # Python bytecode from running main.py locally
 __pycache__/
+
+# Local firmware credentials
+/src/firmware_config.h

@@ -2,132 +2,98 @@
 // ---------------------------------------------------------------------------
 // A minimal ESP32 + e-ink firmware inspired by
 // https://github.com/datascale-ai/inksight :
-//   1. First boot (or held config button) -> WiFi captive-portal provisioning
-//      page (SSID/password + image server + refresh interval).
-//   2. Every wake-up: connect WiFi, GET a pre-rendered 1bpp bitmap from the
-//      image server, draw it full-screen, then sleep until the next cycle.
+//   1. Wi-Fi and refresh settings live in firmware_config.h.
+//   2. Each cycle: sync time, fetch the active Yahoo chart, render it locally,
+//      then wait for the next refresh.
 //
-// The device does not render charts. main.py can generate and serve the
-// bitmap expected by displayFetchAndShow().
+// No image server is required.
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiManager.h>
-#include <esp_sleep.h>
 
+#include "chart.h"
 #include "config.h"
 #include "display.h"
+#include "firmware_config.h"
+#include "market.h"
 
 DeviceConfig cfg;
-WiFiManager wm;
 
-// Custom fields shown on the WiFiManager config portal, alongside the
-// built-in SSID/password fields. Only the server host is entered here; the
-// firmware fills in the scheme, port, and image path.
-WiFiManagerParameter paramServerIp("server", "Image server IP or hostname", "", 64);
-WiFiManagerParameter paramInterval("interval", "Refresh interval (minutes)", "15", 6);
-WiFiManagerParameter paramRotate180("rotate180", "Rotate display 180 degrees (0/1)", "0", 1);
-WiFiManagerParameter paramKeepWifi("keepwifi", "Keep WiFi on between refreshes for USB power (1=USB, 0=battery)", "1", 1);
-
-String deviceId() {
-  return WiFi.macAddress();
-}
-
-bool configButtonHeld() {
-  pinMode(PIN_CONFIG_BUTTON, INPUT_PULLUP);
-  if (digitalRead(PIN_CONFIG_BUTTON) != LOW) return false;
-
-  // debounce / require a real hold, not a bump
-  uint32_t start = millis();
-  while (digitalRead(PIN_CONFIG_BUTTON) == LOW) {
-    if (millis() - start > 3000) return true;
-    delay(10);
-  }
-  return false;
-}
-
-void saveConfigCallback() {
-  cfg.serverIp    = paramServerIp.getValue();
-  cfg.intervalMin = String(paramInterval.getValue()).toInt();
-  if (cfg.intervalMin < MIN_REFRESH_INTERVAL_MIN ||
-      cfg.intervalMin > MAX_REFRESH_INTERVAL_MIN) {
-    cfg.intervalMin = 15;
-  }
-  cfg.rotate180 = String(paramRotate180.getValue()).toInt() != 0;
-  cfg.keepWifi  = String(paramKeepWifi.getValue()).toInt() != 0;
-  configSave(cfg);
-}
-
-void runProvisioningPortal() {
-  displayShowMessage("Setup mode",
-                      "Join WiFi \"epaper-display-Setup\" then open 192.168.4.1");
-
-  paramServerIp.setValue(cfg.serverIp.c_str(), 64);
-  paramInterval.setValue(String(cfg.intervalMin).c_str(), 6);
-  paramRotate180.setValue(cfg.rotate180 ? "1" : "0", 1);
-  paramKeepWifi.setValue(cfg.keepWifi ? "1" : "0", 1);
-  wm.addParameter(&paramServerIp);
-  wm.addParameter(&paramInterval);
-  wm.addParameter(&paramRotate180);
-  wm.addParameter(&paramKeepWifi);
-  wm.setSaveParamsCallback(saveConfigCallback);
-  wm.setConfigPortalTimeout(300); // give up and retry later if nobody shows up
-
-  if (!wm.startConfigPortal("epaper-display-Setup")) {
-    displayShowMessage("Setup timed out", "Will retry after deep sleep");
-  }
-}
-
-void goToSleep(const DeviceConfig &cfg) {
-  displayHibernate();
-
-  if (cfg.keepWifi) {
-    // USB/mains powered: no power constraint, so keep the WiFi association
-    // alive by staying awake (modem sleep) between refreshes instead of
-    // sleeping. Light sleep here would power down the radio and silently drop
-    // the connection (ESP-IDF docs), after which the device could never fetch
-    // again — so a plain delay() is both simpler and reliable.
-    uint64_t ms = (uint64_t)cfg.intervalMin * 60ULL * 1000ULL;
-    WiFi.setSleep(true);
-    Serial.printf("Keeping WiFi on; next refresh in %u min\n", cfg.intervalMin);
-    delay((uint32_t)ms);
-    return;  // loop() runs runCycle() again with WiFi still connected
+bool connectWifi(const DeviceConfig &cfg) {
+  if (WiFi.status() == WL_CONNECTED) return true;
+  if (cfg.wifiSsid.length() == 0) {
+    Serial.println("WiFi skipped: SSID is empty");
+    return false;
   }
 
-  uint64_t us = (uint64_t)cfg.intervalMin * 60ULL * 1000000ULL;
-  esp_sleep_enable_timer_wakeup(us);
-  WiFi.mode(WIFI_OFF);
-  esp_deep_sleep_start();
-}
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPassword.c_str());
+  Serial.printf("Connecting WiFi: %s\n", cfg.wifiSsid.c_str());
 
-void runCycle() {
-  displayInit(cfg);
-
-  bool forcePortal = configButtonHeld();
-
-  // Battery/deep-sleep boots (or a dropped keepWiFi association) arrive with
-  // WiFi down and reconnect here. In keepWifi mode we stay awake between
-  // refreshes, so WiFi.status() is already WL_CONNECTED and we skip it.
-  if (forcePortal || !cfg.provisioned || cfg.serverIp.length() == 0) {
-    runProvisioningPortal();
-  } else if (WiFi.status() != WL_CONNECTED) {
-    if (!wm.autoConnect("epaper-display-Setup")) {
-      goToSleep(cfg);
-      return;
-    }
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - start < EPAPER_WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (cfg.serverIp.length() == 0) {
-      displayShowMessage("No server configured",
-                          "Hold BOOT button 3s to open setup");
-    } else {
-      displayFetchAndShow(cfg, deviceId());
-    }
+    Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+    return true;
+  }
+  Serial.println("WiFi connection timed out");
+  return false;
+}
+
+void waitForNextRefresh(const DeviceConfig &cfg) {
+  displayHibernate();
+
+  // The device is mains-powered, so keep the WiFi association alive and only
+  // use modem sleep to reduce radio power between refreshes.
+  WiFi.setSleep(true);
+  Serial.printf("Next refresh in %u min\n", cfg.intervalMin);
+  delay((uint32_t)cfg.intervalMin * 60U * 1000U);
+}
+
+void displayLocalChart() {
+  if (!marketSyncTime()) {
+    displayShowMessage("Clock not set", "Check internet access");
+    return;
   }
 
-  goToSleep(cfg);
+  const time_t now = time(nullptr);
+  struct tm marketNow;
+  const MarketSegment *segment = marketActiveSegment(now, marketNow);
+  if (segment == nullptr) {
+    Serial.println("No market is open");
+    return;
+  }
+
+  Serial.printf("%s market time: %02d:%02d\n", segment->name, marketNow.tm_hour,
+                marketNow.tm_min);
+  MarketSeries series;
+  if (!marketFetchSeries(*segment, now, series)) return;
+
+  const float pct =
+      (series.price - series.prevClose) / series.prevClose * 100.0f;
+  Serial.printf("%s: %.2f (%+.2f%%), %d points\n", segment->displayName,
+                series.price, pct, series.count);
+  chartDisplay(*segment, series);
+}
+
+void runCycle() {
+  displayInit();
+
+  if (!connectWifi(cfg)) {
+    displayShowMessage("WiFi connection failed",
+                        "Check src/firmware_config.h");
+    waitForNextRefresh(cfg);
+    return;
+  }
+
+  displayLocalChart();
+
+  waitForNextRefresh(cfg);
 }
 
 void setup() {
@@ -135,19 +101,12 @@ void setup() {
   delay(200);
 
   configLoad(cfg);
-
-  // The saved configuration survives power cycles; the provisioning portal is
-  // reached by holding the BOOT button (see runCycle()). WiFiManager likewise
-  // reuses the stored WiFi credentials. Never auto-open the captive portal on
-  // a failed connect: a bad network must just sleep and retry next cycle
-  // instead of entering setup mode.
-  wm.setConnectTimeout(15);
-  wm.setEnableConfigPortal(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
 }
 
 void loop() {
-  // Deep sleep never returns, so this runs once per wake; keepWifi mode
-  // stays awake between refreshes (delay in goToSleep) and loops back into
-  // the next cycle with the WiFi association intact.
+  // The board stays powered, so loop back into the next refresh cycle while
+  // the WiFi association remains alive.
   runCycle();
 }

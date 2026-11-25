@@ -11,8 +11,7 @@
 #define EPD_WIDTH  400
 #define EPD_HEIGHT 300
 
-// Expected server image size: 1 bit per pixel, packed MSB-first, row-major,
-// with no padding between rows.
+// Framebuffer size: 1 bit per pixel, packed MSB-first, row-major, no padding.
 #define EPD_IMAGE_BYTES ((EPD_WIDTH * EPD_HEIGHT) / 8)
 
 // ---------------------------------------------------------------------------
@@ -29,24 +28,15 @@
 #define PIN_EPD_RST   26
 #define PIN_EPD_BUSY  25
 
-// Hold this pin LOW at boot to force the WiFi setup portal. GPIO0 is the
-// BOOT/FLASH button on virtually every ESP32-WROOM-32E devkit.
-#define PIN_CONFIG_BUTTON 0
-
-// Initializes the panel using the configured orientation.
-void displayInit(const DeviceConfig &cfg);
-
-// Downloads the raw 1bpp bitmap from the configured image server and draws it
-// full-screen. Returns true on success.
-bool displayFetchAndShow(const DeviceConfig &cfg, const String &deviceId);
+// Initializes the fixed-orientation panel.
+void displayInit();
 
 // Draws an already-rendered 400x300 1bpp bitmap (bit set = black) full-screen,
 // skipping the redraw when the frame is identical to the last one shown. The
 // caller keeps ownership of `bitmap`. Returns true on success.
 bool displayShowBitmap(const uint8_t *bitmap);
 
-// Draws a simple centered two-line status/error message (used for setup
-// mode, WiFi failures, fetch failures, etc.) so the screen is never blank.
+// Draws a simple centered two-line status/error message.
 void displayShowMessage(const String &line1, const String &line2);
 
 // Puts the panel into deep sleep to avoid ghosting/damage while the MCU
